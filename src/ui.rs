@@ -1377,11 +1377,6 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
             });
         return;
     }
-    let run = |app: &mut App| match pending {
-        Pending::New => app.new_scene(),
-        Pending::Open => app.open_dialog(),
-        Pending::Clear => app.clear_canvas(),
-    };
     egui::Window::new("Alterações não salvas")
         .collapsible(false)
         .resizable(false)
@@ -1391,16 +1386,13 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Salvar").clicked() {
-                    app.save();
-                    if !app.dirty {
-                        app.confirm = None;
-                        run(app);
-                    }
+                    app.confirm = None;
+                    app.save_then(Some(pending));
                 }
                 if ui.button("Descartar").clicked() {
                     app.dirty = false;
                     app.confirm = None;
-                    run(app);
+                    app.run_pending(pending);
                 }
                 if ui.button("Cancelar").clicked() {
                     app.confirm = None;
