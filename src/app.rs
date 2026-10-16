@@ -112,6 +112,8 @@ pub struct TextEditing {
 pub enum Pending {
     New,
     Open,
+    /// Limpar o canvas (Ctrl+Delete).
+    Clear,
 }
 
 struct Cached {
@@ -126,6 +128,8 @@ pub struct App {
     pub selected: HashSet<String>,
     pub tool: Tool,
     pub tool_locked: bool,
+    /// Ferramenta anterior, para H e E alternarem de volta (como no Excalidraw).
+    prev_tool: Tool,
     pub style: Style,
     pub cam: Cam,
     pub drag: Drag,
@@ -141,6 +145,13 @@ pub struct App {
     pub show_menu: bool,
     pub show_export: bool,
     pub show_help: bool,
+    pub show_stats: bool,
+    pub zen_mode: bool,
+    pub view_mode: bool,
+    /// Abre o seletor de cor do traço (`Some(false)`) ou do fundo (`Some(true)`) — atalhos S e G.
+    pub open_picker: Option<bool>,
+    /// Estilo copiado com Ctrl+Alt+C.
+    copied_style: Option<Element>,
     pub export_opts: ExportOpts,
     pub export_selection_only: bool,
     pub export_preview: Option<(String, egui::TextureHandle)>,
@@ -192,6 +203,22 @@ pub fn autosave_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("rustdraw").join("autosave.excalidraw"))
 }
 
+/// Consome uma tecla pressionada com exatamente estes modificadores (Shift e Alt
+/// precisam bater, ao contrário de `consume_key`). Com `physical`, compara a
+/// posição física da tecla.
+fn take_key(i: &mut egui::InputState, m: Modifiers, key: Key, physical: bool) -> bool {
+    let mut hit = false;
+    i.events.retain(|ev| {
+        let is = !hit
+            && matches!(ev, egui::Event::Key { key: k, physical_key, modifiers, pressed: true, .. }
+                if modifiers.matches_exact(m)
+                    && if physical { physical_key.unwrap_or(*k) == key } else { *k == key });
+        hit |= is;
+        !is
+    });
+    hit
+}
+
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / GRID).round() * GRID } else { v }
 }
@@ -205,6 +232,7 @@ impl App {
             selected: HashSet::new(),
             tool: Tool::Select,
             tool_locked: false,
+            prev_tool: Tool::Select,
             style: Style::default(),
             cam: Cam {
                 scroll: P::new(0.0, 0.0),
@@ -224,6 +252,11 @@ impl App {
             show_menu: false,
             show_export: false,
             show_help: false,
+            show_stats: false,
+            zen_mode: false,
+            view_mode: false,
+            open_picker: None,
+            copied_style: None,
             export_opts: ExportOpts::default(),
             export_selection_only: false,
             export_preview: None,
@@ -538,6 +571,9 @@ impl App {
     pub fn set_tool(&mut self, t: Tool) {
         self.finish_editing();
         self.finish_linear();
+        if t != self.tool {
+            self.prev_tool = self.tool;
+        }
         self.tool = t;
         if t != Tool::Select {
             self.selected.clear();
@@ -686,6 +722,264 @@ impl App {
             e.touch();
         }
         self.commit(before);
+    }
+
+    /// Ctrl+Delete: apaga todos os elementos (pode ser desfeito).
+    pub fn clear_canvas(&mut self) {
+        self.finish_editing();
+        self.finish_linear();
+        let before = std::mem::take(&mut self.elements);
+        self.selected.clear();
+        self.commit(before);
+    }
+
+    /// Ctrl+Shift+L: trava ou destrava os elementos selecionados.
+    pub fn toggle_lock(&mut self) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let before = self.elements.clone();
+        let sel = self.selected.clone();
+        let lock = self
+            .elements
+            .iter()
+            .filter(|e| sel.contains(&e.id))
+            .any(|e| !e.locked);
+        for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
+            e.locked = lock;
+            e.touch();
+        }
+        self.commit(before);
+        self.toast(if lock { "Travado" } else { "Destravado" });
+    }
+
+    /// Shift+H / Shift+V: espelha a seleção em torno do centro dela.
+    pub fn flip_selected(&mut self, horizontal: bool) {
+        let Some(b) = self.selection_bounds() else {
+            return;
+        };
+        let before = self.elements.clone();
+        let sel = self.selected.clone();
+        let mid = if horizontal {
+            (b.min.x + b.max.x) as f64
+        } else {
+            (b.min.y + b.max.y) as f64
+        };
+        for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
+            flip(e, mid, horizontal);
+        }
+        self.commit(before);
+    }
+
+    /// Ctrl+Shift+setas: alinha a seleção (grupos se movem como uma unidade).
+    pub fn align_selected(&mut self, dx: i8, dy: i8) {
+        let Some(all) = self.selection_bounds() else {
+            return;
+        };
+        let mut units: Vec<(String, Vec<String>)> = vec![];
+        for e in self
+            .elements
+            .iter()
+            .filter(|e| self.selected.contains(&e.id))
+        {
+            let key = e.group_ids.last().cloned().unwrap_or_else(|| e.id.clone());
+            match units.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, ids)) => ids.push(e.id.clone()),
+                None => units.push((key, vec![e.id.clone()])),
+            }
+        }
+        if units.len() < 2 {
+            return;
+        }
+        let before = self.elements.clone();
+        for (_, ids) in units {
+            let Some(b) = geom::scene_bounds(self.elements.iter().filter(|e| ids.contains(&e.id)))
+            else {
+                continue;
+            };
+            let ox = match dx {
+                -1 => all.min.x - b.min.x,
+                1 => all.max.x - b.max.x,
+                _ => 0.0,
+            } as f64;
+            let oy = match dy {
+                -1 => all.min.y - b.min.y,
+                1 => all.max.y - b.max.y,
+                _ => 0.0,
+            } as f64;
+            for e in self.elements.iter_mut().filter(|e| ids.contains(&e.id)) {
+                e.x += ox;
+                e.y += oy;
+                e.touch();
+            }
+        }
+        self.commit(before);
+    }
+
+    /// Ctrl+Shift+< / >: diminui ou aumenta a fonte em 10%.
+    pub fn change_font_size(&mut self, increase: bool) {
+        let resize = move |fs: f64| {
+            if increase {
+                (fs * 1.1).round()
+            } else {
+                (fs / 1.1).round().max(1.0)
+            }
+        };
+        let first = self
+            .selected_elements()
+            .into_iter()
+            .find(|e| e.kind == "text")
+            .map(|e| e.font_size());
+        let Some(first) = first else { return };
+        self.style.font_size = resize(first);
+        self.apply_prop("font", move |e| {
+            if e.kind == "text" {
+                let fs = resize(e.font_size());
+                e.set_field("fontSize", serde_json::json!(fs));
+            }
+        });
+    }
+
+    /// Tab / Shift+Tab: troca o tipo das formas selecionadas
+    /// (retângulo → losango → elipse; linha ↔ seta).
+    pub fn convert_selected(&mut self, forward: bool) {
+        const SHAPES: [&str; 3] = ["rectangle", "diamond", "ellipse"];
+        let sel = self.selected.clone();
+        let kinds: Vec<&str> = self
+            .elements
+            .iter()
+            .filter(|e| sel.contains(&e.id))
+            .map(|e| e.kind.as_str())
+            .collect();
+        let shapes = !kinds.is_empty() && kinds.iter().all(|k| SHAPES.contains(k));
+        let linear = !kinds.is_empty() && kinds.iter().all(|k| matches!(*k, "line" | "arrow"));
+        if !shapes && !linear {
+            return;
+        }
+        let before = self.elements.clone();
+        let style = self.style.clone();
+        for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
+            let round = e.is_round();
+            if shapes {
+                let i = SHAPES.iter().position(|k| *k == e.kind).unwrap_or(0);
+                let next = if forward { (i + 1) % 3 } else { (i + 2) % 3 };
+                e.kind = SHAPES[next].into();
+                e.roundness = match (round, SHAPES[next]) {
+                    (true, "rectangle") => Some(serde_json::json!({"type": 3})),
+                    (true, "diamond") => Some(serde_json::json!({"type": 2})),
+                    _ => None,
+                };
+            } else {
+                let to_arrow = e.kind == "line";
+                e.kind = if to_arrow { "arrow" } else { "line" }.into();
+                let (sa, ea) = if to_arrow {
+                    (style.start_arrowhead.clone(), style.end_arrowhead.clone())
+                } else {
+                    (None, None)
+                };
+                let v = |a: Option<String>| a.map(serde_json::Value::String).unwrap_or_default();
+                e.set_field("startArrowhead", v(sa));
+                e.set_field("endArrowhead", v(ea));
+                if to_arrow {
+                    e.background_color = "transparent".into();
+                    e.set_field("elbowed", serde_json::Value::Bool(false));
+                } else {
+                    e.extra.remove("elbowed");
+                }
+            }
+            e.touch();
+        }
+        self.commit(before);
+    }
+
+    /// Ctrl+Alt+C: copia o estilo do primeiro elemento selecionado.
+    pub fn copy_styles(&mut self) {
+        let first = self
+            .elements
+            .iter()
+            .find(|e| self.selected.contains(&e.id))
+            .cloned();
+        if first.is_some() {
+            self.copied_style = first;
+            self.toast("Estilo copiado");
+        }
+    }
+
+    /// Ctrl+Alt+V: aplica o estilo copiado à seleção.
+    pub fn paste_styles(&mut self) {
+        let Some(src) = self.copied_style.clone() else {
+            return;
+        };
+        if self.selected.is_empty() {
+            return;
+        }
+        let before = self.elements.clone();
+        let sel = self.selected.clone();
+        for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
+            e.stroke_color = src.stroke_color.clone();
+            if e.kind != "text" && !(e.kind == "arrow" && src.kind != "arrow") {
+                e.background_color = src.background_color.clone();
+            }
+            e.fill_style = src.fill_style.clone();
+            e.stroke_width = src.stroke_width;
+            e.stroke_style = src.stroke_style.clone();
+            e.roughness = src.roughness;
+            e.opacity = src.opacity;
+            if matches!(e.kind.as_str(), "rectangle" | "diamond" | "line" | "arrow") {
+                e.roundness = src.is_round().then(
+                    || serde_json::json!({"type": if e.kind == "rectangle" { 3 } else { 2 }}),
+                );
+            }
+            if e.kind == "text" && src.kind == "text" {
+                for k in ["fontSize", "fontFamily", "textAlign"] {
+                    if let Some(v) = src.extra.get(k) {
+                        e.extra.insert(k.into(), v.clone());
+                    }
+                }
+                self.needs_measure.insert(e.id.clone());
+            }
+            if e.kind == "arrow" && src.kind == "arrow" {
+                for k in ["startArrowhead", "endArrowhead"] {
+                    let v = src.extra.get(k).cloned().unwrap_or_default();
+                    e.extra.insert(k.into(), v);
+                }
+            }
+            e.touch();
+        }
+        self.commit(before);
+    }
+
+    /// Shift+Alt+C: copia a seleção (ou tudo) como imagem PNG.
+    pub fn copy_png(&mut self, ctx: &egui::Context) {
+        let els: Vec<Element> = if self.selected.is_empty() {
+            self.elements.clone()
+        } else {
+            self.selected_elements().into_iter().cloned().collect()
+        };
+        if els.is_empty() {
+            return;
+        }
+        let mut opts = self.export_opts.clone();
+        opts.view_background = self.view_bg.clone();
+        match export::render_pixmap(&els, &opts) {
+            Ok(pm) => {
+                let size = [pm.width() as usize, pm.height() as usize];
+                ctx.copy_image(egui::ColorImage::from_rgba_premultiplied(size, pm.data()));
+                self.toast("Imagem PNG copiada para a área de transferência");
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
+    /// Alt+R: modo de visualização (só navegar, sem editar).
+    pub fn toggle_view_mode(&mut self) {
+        self.finish_editing();
+        self.finish_linear();
+        self.view_mode = !self.view_mode;
+        if self.view_mode {
+            self.selected.clear();
+            self.show_menu = false;
+        }
     }
 
     /// Aplica uma mudança de propriedade à seleção (com agrupamento no histórico).
@@ -848,26 +1142,60 @@ impl App {
         );
     }
 
+    /// Zoom em passos de 10% (como o `ZOOM_STEP` do Excalidraw), centrado na tela.
+    pub fn zoom_step(&mut self, view: egui::Rect, dir: f32) {
+        let z = ((self.cam.zoom + 0.1 * dir) * 10.0).round() / 10.0;
+        let z = z.clamp(0.1, 30.0);
+        self.zoom_at(view.center(), z / self.cam.zoom);
+    }
+
+    pub fn reset_zoom(&mut self, view: egui::Rect) {
+        self.zoom_at(view.center(), 1.0 / self.cam.zoom);
+    }
+
+    /// Shift+1: enquadra todos os elementos (sem passar de 100%).
     pub fn zoom_to_fit(&mut self, view: egui::Rect) {
+        let els: Vec<&Element> = self.elements.iter().collect();
+        self.fit_bounds(view, geom::scene_bounds(els), false);
+    }
+
+    /// Shift+2 (`contain = false`, sem passar de 100%) e Shift+3 (`contain = true`,
+    /// preenche a tela): enquadra a seleção, ou tudo se nada estiver selecionado.
+    pub fn zoom_to_selection(&mut self, view: egui::Rect, contain: bool) {
         let els: Vec<&Element> = if self.selected.is_empty() {
             self.elements.iter().collect()
         } else {
             self.selected_elements()
         };
-        let Some(b) = geom::scene_bounds(els) else {
+        self.fit_bounds(view, geom::scene_bounds(els), contain);
+    }
+
+    fn fit_bounds(&mut self, view: egui::Rect, b: Option<Rect>, contain: bool) {
+        let Some(b) = b else {
             self.cam.zoom = 1.0;
             self.cam.scroll = P::new(0.0, 0.0);
             return;
         };
+        let max = if contain { 30.0 } else { 1.0 };
         let z = ((view.width() - 160.0) / b.width().max(1.0))
             .min((view.height() - 160.0) / b.height().max(1.0))
-            .clamp(0.1, 1.0);
+            .clamp(0.1, max);
         self.cam.zoom = z;
         let c = b.center();
         self.cam.scroll = P::new(
             (view.center().x - view.min.x) / z - c.x,
             (view.center().y - view.min.y) / z - c.y,
         );
+    }
+
+    /// PgUp/PgDn: rola uma tela na vertical (com Shift, na horizontal).
+    pub fn scroll_page(&mut self, view: egui::Rect, down: bool, horizontal: bool) {
+        let sign = if down { -1.0 } else { 1.0 };
+        if horizontal {
+            self.cam.scroll.x += sign * view.width() / self.cam.zoom;
+        } else {
+            self.cam.scroll.y += sign * view.height() / self.cam.zoom;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1005,13 +1333,13 @@ impl App {
                     return;
                 }
             }
-            if space || self.tool == Tool::Hand {
+            if space || self.tool == Tool::Hand || self.view_mode {
                 self.drag = Drag::Pan { last: pos };
             } else {
                 self.on_press(wp, pos, mods);
             }
         }
-        if over && dbl && self.tool == Tool::Select && self.editing.is_none() {
+        if over && dbl && self.tool == Tool::Select && self.editing.is_none() && !self.view_mode {
             self.on_double_click(wp);
         }
         if over && dbl && matches!(self.drag, Drag::LinearMulti { .. }) {
@@ -1032,7 +1360,7 @@ impl App {
         let cursor = match (&self.drag, self.tool) {
             (Drag::Pan { .. }, _) => CursorIcon::Grabbing,
             (_, Tool::Hand) => CursorIcon::Grab,
-            _ if space => CursorIcon::Grab,
+            _ if space || self.view_mode => CursorIcon::Grab,
             (Drag::Move { .. }, _) => CursorIcon::Move,
             (_, Tool::Select) if over => match self.handle_at(pos) {
                 Some(Handle::N | Handle::S) => CursorIcon::ResizeVertical,
@@ -1438,18 +1766,20 @@ impl App {
     // Teclado
     // ------------------------------------------------------------------
 
+    /// Atalhos de teclado, iguais aos do Excalidraw (ver `HelpDialog.tsx` e `shortcuts.ts`).
     pub fn handle_keys(&mut self, ctx: &egui::Context, view: egui::Rect) {
         // eventos de área de transferência
         let events = ctx.input(|i| i.events.clone());
         let typing = ctx.egui_wants_keyboard_input();
         for ev in &events {
             match ev {
-                egui::Event::Copy if !typing => self.copy_selection(ctx),
-                egui::Event::Cut if !typing => {
+                _ if typing || self.view_mode => {}
+                egui::Event::Copy => self.copy_selection(ctx),
+                egui::Event::Cut => {
                     self.copy_selection(ctx);
                     self.delete_selected();
                 }
-                egui::Event::Paste(t) if !typing => self.paste(t),
+                egui::Event::Paste(t) => self.paste(t),
                 _ => {}
             }
         }
@@ -1467,18 +1797,79 @@ impl App {
         if typing {
             return;
         }
+        let n = Modifiers::NONE;
+        let sh = Modifiers::SHIFT;
+        let alt = Modifiers::ALT;
         let cmd = Modifiers::COMMAND;
-        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
-        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+        let cs = cmd | sh;
+        let ca = cmd | alt;
+        // `k` compara a tecla lógica (`event.key` no Excalidraw);
+        // `kc` compara a posição física (`event.code`), que independe do layout.
+        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| take_key(i, m, key, false));
+        let kc = |m: Modifiers, key: Key| ctx.input_mut(|i| take_key(i, m, key, true));
 
+        // --- visualização e câmera (valem também no modo de visualização) ---
+        if kc(alt, Key::R) {
+            self.toggle_view_mode();
+        }
+        if kc(alt, Key::Z) {
+            self.zen_mode = !self.zen_mode;
+        }
+        if kc(alt, Key::Slash) {
+            self.show_stats = !self.show_stats;
+        }
+        if kc(alt | sh, Key::D) {
+            self.dark = !self.dark;
+        }
+        if kc(cmd, Key::Quote) {
+            self.grid = !self.grid;
+        }
+        for m in [cmd, sh, cs] {
+            if kc(m, Key::Equals) || k(m, Key::Plus) {
+                self.zoom_step(view, 1.0);
+            }
+            if kc(m, Key::Minus) {
+                self.zoom_step(view, -1.0);
+            }
+            if kc(m, Key::Num0) {
+                self.reset_zoom(view);
+            }
+        }
+        if kc(sh, Key::Num1) {
+            self.zoom_to_fit(view);
+        }
+        if kc(sh, Key::Num2) {
+            self.zoom_to_selection(view, false);
+        }
+        if kc(sh, Key::Num3) {
+            self.zoom_to_selection(view, true);
+        }
+        for m in [n, sh] {
+            if k(m, Key::PageUp) {
+                self.scroll_page(view, false, m == sh);
+            }
+            if k(m, Key::PageDown) {
+                self.scroll_page(view, true, m == sh);
+            }
+        }
+        if ctx.input_mut(|i| i.consume_key(n, Key::Questionmark)) || k(n, Key::F1) {
+            self.show_help = !self.show_help;
+        }
+        if self.view_mode {
+            return;
+        }
+
+        // --- arquivo e histórico ---
         if k(cs, Key::Z) || k(cmd, Key::Y) {
             self.redo();
-        } else if k(cmd, Key::Z) {
+        }
+        if k(cmd, Key::Z) {
             self.undo();
         }
         if k(cs, Key::S) {
             self.save_as();
-        } else if k(cmd, Key::S) {
+        }
+        if k(cmd, Key::S) {
             self.save();
         }
         if k(cmd, Key::O) {
@@ -1487,6 +1878,11 @@ impl App {
         if k(cs, Key::E) {
             self.show_export = true;
         }
+        if (k(cmd, Key::Delete) || k(cmd, Key::Backspace)) && !self.elements.is_empty() {
+            self.confirm = Some(Pending::Clear);
+        }
+
+        // --- edição ---
         if k(cmd, Key::A) {
             self.select_all();
         }
@@ -1495,42 +1891,70 @@ impl App {
         }
         if k(cs, Key::G) {
             self.group_selected(false);
-        } else if k(cmd, Key::G) {
+        }
+        if k(cmd, Key::G) {
             self.group_selected(true);
         }
-        if k(cs, Key::CloseBracket) {
+        // no macOS, "até o fim" é Cmd+Alt+[ ]; nos demais, Ctrl+Shift+[ ]
+        let all_the_way = if cfg!(target_os = "macos") { ca } else { cs };
+        if kc(all_the_way, Key::CloseBracket) {
             self.reorder(true, true);
-        } else if k(cmd, Key::CloseBracket) {
+        }
+        if kc(cmd, Key::CloseBracket) {
             self.reorder(true, false);
         }
-        if k(cs, Key::OpenBracket) {
+        if kc(all_the_way, Key::OpenBracket) {
             self.reorder(false, true);
-        } else if k(cmd, Key::OpenBracket) {
+        }
+        if kc(cmd, Key::OpenBracket) {
             self.reorder(false, false);
         }
-        if k(cmd, Key::Quote) {
-            self.grid = !self.grid;
+        if kc(ca, Key::C) {
+            self.copy_styles();
         }
-        if k(cmd, Key::Equals) || k(cmd, Key::Plus) {
-            self.zoom_at(view.center(), 1.1);
+        if kc(ca, Key::V) {
+            self.paste_styles();
         }
-        if k(cmd, Key::Minus) {
-            self.zoom_at(view.center(), 1.0 / 1.1);
+        if kc(alt | sh, Key::C) {
+            self.copy_png(ctx);
         }
-        if k(cmd, Key::Num0) {
-            let c = view.center();
-            self.zoom_at(c, 1.0 / self.cam.zoom);
+        if k(cs, Key::L) {
+            self.toggle_lock();
         }
-        if k(Modifiers::SHIFT, Key::Num1) {
-            self.zoom_to_fit(view);
+        if kc(sh, Key::H) {
+            self.flip_selected(true);
         }
-        if k(Modifiers::ALT | Modifiers::SHIFT, Key::D) {
-            self.dark = !self.dark;
+        if kc(sh, Key::V) {
+            self.flip_selected(false);
         }
-        if k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace) {
+        if kc(cs, Key::Comma) {
+            self.change_font_size(false);
+        }
+        if kc(cs, Key::Period) {
+            self.change_font_size(true);
+        }
+        if !self.selected.is_empty() {
+            if k(n, Key::Tab) {
+                self.convert_selected(true);
+            }
+            if k(sh, Key::Tab) {
+                self.convert_selected(false);
+            }
+        }
+        for (key, dx, dy) in [
+            (Key::ArrowLeft, -1, 0),
+            (Key::ArrowRight, 1, 0),
+            (Key::ArrowUp, 0, -1),
+            (Key::ArrowDown, 0, 1),
+        ] {
+            if k(cs, key) {
+                self.align_selected(dx, dy);
+            }
+        }
+        if k(n, Key::Delete) || k(n, Key::Backspace) {
             self.delete_selected();
         }
-        if k(Modifiers::NONE, Key::Escape) {
+        if k(n, Key::Escape) {
             if matches!(self.drag, Drag::LinearMulti { .. }) {
                 self.finish_linear();
             } else {
@@ -1539,7 +1963,7 @@ impl App {
                 self.tool = Tool::Select;
             }
         }
-        if k(Modifiers::NONE, Key::Enter) {
+        if k(n, Key::Enter) {
             if matches!(self.drag, Drag::LinearMulti { .. }) {
                 self.finish_linear();
             } else if let Some(el) = self.single_selected().filter(|e| e.kind == "text") {
@@ -1547,19 +1971,23 @@ impl App {
                 self.edit_text(&id);
             }
         }
-        // setas: mover seleção
+        // setas: mover a seleção 1px (Shift: 5px); com a grade, 1 célula (Shift: 1px)
         for (key, dx, dy) in [
             (Key::ArrowLeft, -1.0, 0.0),
             (Key::ArrowRight, 1.0, 0.0),
             (Key::ArrowUp, 0.0, -1.0),
             (Key::ArrowDown, 0.0, 1.0),
         ] {
-            let big = k(Modifiers::SHIFT, key);
-            if big || k(Modifiers::NONE, key) {
+            let shift = k(sh, key);
+            if shift || k(n, key) {
                 if self.selected.is_empty() {
                     continue;
                 }
-                let step = if big { 5.0 } else { 1.0 };
+                let step = match (self.grid, shift) {
+                    (true, false) => GRID as f64,
+                    (true, true) | (false, false) => 1.0,
+                    (false, true) => 5.0,
+                };
                 let before = self.elements.clone();
                 let sel = self.selected.clone();
                 for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
@@ -1570,8 +1998,23 @@ impl App {
                 self.commit(before);
             }
         }
+        // S / G: abrem o seletor de cor do traço / do fundo
+        let has_bg =
+            |k: &str| matches!(k, "rectangle" | "diamond" | "ellipse" | "line" | "freedraw");
+        let sel_kinds: Vec<String> = self
+            .selected_elements()
+            .iter()
+            .map(|e| e.kind.clone())
+            .collect();
+        let tool_kind = self.tool.kind();
+        let styled = !sel_kinds.is_empty() || tool_kind.is_some();
+        if k(n, Key::S) && styled {
+            self.open_picker = Some(false);
+        }
+        if k(n, Key::G) && (sel_kinds.iter().any(|k| has_bg(k)) || tool_kind.is_some_and(has_bg)) {
+            self.open_picker = Some(true);
+        }
         // ferramentas
-        let n = Modifiers::NONE;
         let tools = [
             (Key::H, Tool::Hand),
             (Key::V, Tool::Select),
@@ -1596,14 +2039,16 @@ impl App {
         ];
         for (key, tool) in tools {
             if k(n, key) {
-                self.set_tool(tool);
+                // mão e borracha alternam de volta para a ferramenta anterior
+                if matches!(tool, Tool::Hand | Tool::Eraser) && self.tool == tool {
+                    self.set_tool(self.prev_tool);
+                } else {
+                    self.set_tool(tool);
+                }
             }
         }
         if k(n, Key::Q) {
             self.tool_locked = !self.tool_locked;
-        }
-        if k(Modifiers::SHIFT, Key::Questionmark) || k(n, Key::F1) {
-            self.show_help = !self.show_help;
         }
     }
 
@@ -1862,6 +2307,31 @@ impl Drop for App {
     }
 }
 
+/// Espelha um elemento em torno da reta x = mid/2 (ou y = mid/2).
+fn flip(e: &mut Element, mid: f64, horizontal: bool) {
+    if e.has_points() {
+        let pts = e
+            .points()
+            .into_iter()
+            .map(|[x, y]| if horizontal { [-x, y] } else { [x, -y] })
+            .collect();
+        if horizontal {
+            e.x = mid - e.x;
+        } else {
+            e.y = mid - e.y;
+        }
+        e.set_points(pts);
+    } else if horizontal {
+        e.x = mid - e.x - e.width;
+    } else {
+        e.y = mid - e.y - e.height;
+    }
+    if e.angle != 0.0 {
+        e.angle = std::f64::consts::TAU - e.angle;
+    }
+    e.touch();
+}
+
 pub fn file_name(p: &std::path::Path) -> String {
     p.file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -2063,5 +2533,45 @@ mod tests {
         let r = resize(&e, Handle::Point(0), P::new(0.0, 0.0), false, false);
         assert_eq!((r.x, r.y), (0.0, 0.0));
         assert_eq!(r.points(), vec![[0.0, 0.0], [110.0, 10.0]]);
+    }
+
+    #[test]
+    fn flip_shape_and_line() {
+        // retângulo em [0,100] espelhado em torno de x = 150 vai para [200,300]
+        let mut e = rect(0.3);
+        flip(&mut e, 300.0, true);
+        assert_eq!((e.x, e.y), (200.0, 0.0));
+        assert!((e.angle - (std::f64::consts::TAU - 0.3)).abs() < 1e-9);
+        // seta de (10,10) a (110,30), invertida na vertical em torno de y = 20
+        let mut a = Element::new("arrow", 10.0, 10.0, &Style::default());
+        a.set_points(vec![[0.0, 0.0], [100.0, 20.0]]);
+        flip(&mut a, 40.0, false);
+        assert_eq!((a.x, a.y), (10.0, 30.0));
+        assert_eq!(a.points(), vec![[0.0, 0.0], [100.0, -20.0]]);
+    }
+
+    fn key_event(key: Key, physical: Key, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(physical),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn take_key_matches_modifiers_exactly() {
+        let mut i = egui::InputState::default();
+        i.events.push(key_event(Key::H, Key::H, Modifiers::SHIFT));
+        // H sem Shift (ferramenta mão) não pode disparar com Shift+H (inverter)
+        assert!(!take_key(&mut i, Modifiers::NONE, Key::H, false));
+        assert!(take_key(&mut i, Modifiers::SHIFT, Key::H, true));
+        assert!(i.events.is_empty());
+        // Shift+1 chega como "!" na tecla lógica; a posição física é o 1
+        i.events
+            .push(key_event(Key::Exclamationmark, Key::Num1, Modifiers::SHIFT));
+        assert!(!take_key(&mut i, Modifiers::SHIFT, Key::Num1, false));
+        assert!(take_key(&mut i, Modifiers::SHIFT, Key::Num1, true));
     }
 }
