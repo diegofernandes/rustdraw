@@ -58,6 +58,15 @@ rustdraw export entrada.excalidraw saida.svg --dark --no-bg
 | Desenho livre | `P` / `7` | | Exportar imagem | `Ctrl+Shift+E` |
 | Texto | `T` / `8` / duplo clique | | Grade / Tema escuro | `Ctrl+'` / `Alt+Shift+D` |
 | Borracha | `E` / `0` | | Todos os atalhos | `?` ou `F1` |
+| Manter ferramenta | `Q` | | Alinhar | `Ctrl+Shift+setas` |
+| Trocar tipo da forma | `Tab` / `Shift+Tab` | | Inverter | `Shift+H` / `Shift+V` |
+| Cor do traço / fundo | `S` / `G` | | Copiar / colar estilos | `Ctrl+Alt+C` / `Ctrl+Alt+V` |
+| Modo zen | `Alt+Z` | | Copiar como PNG | `Shift+Alt+C` |
+| Modo de visualização | `Alt+R` | | Travar / destravar | `Ctrl+Shift+L` |
+| Estatísticas | `Alt+/` | | Tamanho da fonte | `Ctrl+Shift+<` / `>` |
+| Ajustar à seleção | `Shift+2` / `Shift+3` | | Limpar o canvas | `Ctrl+Delete` |
+
+Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`.
 
 ## Arquitetura
 
