@@ -242,27 +242,26 @@ impl App {
         };
         if let Some(p) = open {
             app.load_path(&p);
-        } else if let Some(p) = autosave_path().filter(|p| p.exists()) {
-            if let Ok(txt) = std::fs::read_to_string(&p) {
-                if let Ok(f) = SceneFile::parse(&txt) {
-                    app.file_path = f
-                        .app_state
-                        .get("rustdrawFilePath")
-                        .and_then(|v| v.as_str())
-                        .map(PathBuf::from);
-                    app.dirty = f
-                        .app_state
-                        .get("rustdrawDirty")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    app.dark = f
-                        .app_state
-                        .get("theme")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|t| t == "dark");
-                    app.apply_scene(f);
-                }
-            }
+        } else if let Some(p) = autosave_path().filter(|p| p.exists())
+            && let Ok(txt) = std::fs::read_to_string(&p)
+            && let Ok(f) = SceneFile::parse(&txt)
+        {
+            app.file_path = f
+                .app_state
+                .get("rustdrawFilePath")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from);
+            app.dirty = f
+                .app_state
+                .get("rustdrawDirty")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            app.dark = f
+                .app_state
+                .get("theme")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t == "dark");
+            app.apply_scene(f);
         }
         app
     }
@@ -1306,11 +1305,11 @@ impl App {
                     return;
                 }
                 let originals = originals.clone();
-                if let Some((_, ox, oy)) = originals.first() {
-                    if g {
-                        d.x = snap(*ox as f32 + d.x, true) - *ox as f32;
-                        d.y = snap(*oy as f32 + d.y, true) - *oy as f32;
-                    }
+                if let Some((_, ox, oy)) = originals.first()
+                    && g
+                {
+                    d.x = snap(*ox as f32 + d.x, true) - *ox as f32;
+                    d.y = snap(*oy as f32 + d.y, true) - *oy as f32;
                 }
                 for (id, ox, oy) in originals {
                     if let Some(el) = self.get_mut(&id) {
@@ -1774,23 +1773,20 @@ impl App {
                 };
                 painter.add(egui::Shape::closed_line(pts, stroke));
             }
-            if multi {
-                if let Some(b) = self.selection_bounds() {
-                    let r =
-                        egui::Rect::from_two_pos(self.cam.s(b.min), self.cam.s(b.max)).expand(4.0);
-                    painter.add(egui::Shape::dashed_line(
-                        &[
-                            r.left_top(),
-                            r.right_top(),
-                            r.right_bottom(),
-                            r.left_bottom(),
-                            r.left_top(),
-                        ],
-                        sel_stroke,
-                        5.0,
-                        4.0,
-                    ));
-                }
+            if multi && let Some(b) = self.selection_bounds() {
+                let r = egui::Rect::from_two_pos(self.cam.s(b.min), self.cam.s(b.max)).expand(4.0);
+                painter.add(egui::Shape::dashed_line(
+                    &[
+                        r.left_top(),
+                        r.right_top(),
+                        r.right_bottom(),
+                        r.left_bottom(),
+                        r.left_top(),
+                    ],
+                    sel_stroke,
+                    5.0,
+                    4.0,
+                ));
             }
             let handle_fill = if self.dark {
                 Color32::from_gray(30)
