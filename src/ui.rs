@@ -309,6 +309,10 @@ fn color_row(ui: &mut Ui, app: &mut App, bg: bool) {
         let mut c32 = parse_color(&current)
             .map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
             .unwrap_or(Color32::TRANSPARENT);
+        if app.open_picker == Some(bg) {
+            app.open_picker = None;
+            egui::Popup::open_id(ui.ctx(), ui.auto_id_with("popup"));
+        }
         let resp = egui::widgets::color_picker::color_edit_button_srgba(
             ui,
             &mut c32,
@@ -948,12 +952,24 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 if item(ui, "Novo desenho", "") {
                     app.new_scene();
                 }
+                if item(ui, "Limpar o canvas", "Ctrl+Delete") && !app.elements.is_empty() {
+                    app.confirm = Some(Pending::Clear);
+                }
                 if item(ui, "Atalhos e ajuda", "?") {
                     app.show_help = true;
                 }
                 ui.separator();
                 ui.checkbox(&mut app.dark, "Tema escuro  (Alt+Shift+D)");
                 ui.checkbox(&mut app.grid, "Grade  (Ctrl+')");
+                ui.checkbox(&mut app.zen_mode, "Modo zen  (Alt+Z)");
+                let mut view_mode = app.view_mode;
+                if ui
+                    .checkbox(&mut view_mode, "Modo de visualização  (Alt+R)")
+                    .changed()
+                {
+                    app.toggle_view_mode();
+                }
+                ui.checkbox(&mut app.show_stats, "Estatísticas  (Alt+/)");
                 section(ui, "Fundo do canvas");
                 ui.horizontal(|ui| {
                     for c in CANVAS_BGS {
@@ -997,7 +1013,7 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                             })
                             .clicked()
                             {
-                                app.zoom_at(view.center(), 1.0 / 1.1);
+                                app.zoom_step(view, -1.0);
                             }
                             let pct = format!("{:.0}%", app.cam.zoom * 100.0);
                             if ui
@@ -1009,8 +1025,7 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                                 .on_hover_text("Redefinir zoom (Ctrl+0) · Ajustar à tela: Shift+1")
                                 .clicked()
                             {
-                                let c = view.center();
-                                app.zoom_at(c, 1.0 / app.cam.zoom);
+                                app.reset_zoom(view);
                             }
                             if icon_button(ui, false, 30.0, "Aumentar zoom (Ctrl++)", |p, r, c| {
                                 p.line_segment(
@@ -1024,7 +1039,7 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                             })
                             .clicked()
                             {
-                                app.zoom_at(view.center(), 1.1);
+                                app.zoom_step(view, 1.0);
                             }
                         });
                     });
@@ -1262,45 +1277,73 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
         .open(&mut open)
         .show(ctx, |ui| {
             ui.columns(2, |cols| {
-                let rows_l = [
-                    ("Mover a tela", "H · Espaço+arrastar"),
-                    ("Seleção", "V / 1"),
-                    ("Retângulo", "R / 2"),
-                    ("Losango", "D / 3"),
-                    ("Elipse", "O / 4"),
-                    ("Seta", "A / 5"),
-                    ("Linha", "L / 6"),
-                    ("Desenho livre", "P / X / 7"),
-                    ("Texto", "T / 8 · duplo clique"),
-                    ("Borracha", "E / 0"),
-                    ("Manter ferramenta", "Q"),
-                    ("Linha ponto a ponto", "cliques · Enter/Esc"),
-                    ("Mover a tela (mouse)", "roda · botão do meio"),
+                // mesma organização do diálogo de atalhos do Excalidraw
+                let tools: &[(&str, &str)] = &[
+                    ("Mão (mover a tela)", "H"),
+                    ("Seleção", "V ou 1"),
+                    ("Retângulo", "R ou 2"),
+                    ("Losango", "D ou 3"),
+                    ("Elipse", "O ou 4"),
+                    ("Seta", "A ou 5"),
+                    ("Linha", "L ou 6"),
+                    ("Desenho livre", "P ou 7"),
+                    ("Texto", "T ou 8"),
+                    ("Borracha", "E ou 0"),
+                    ("Editar texto", "Enter"),
+                    ("Concluir texto", "Esc · Ctrl+Enter"),
+                    ("Manter ferramenta ativa", "Q"),
+                    ("Trocar tipo da forma", "Tab · Shift+Tab"),
                 ];
-                let rows_r = [
-                    ("Desfazer / Refazer", "Ctrl+Z / Ctrl+Shift+Z"),
-                    ("Copiar / Recortar / Colar", "Ctrl+C / X / V"),
-                    ("Duplicar", "Ctrl+D · Alt+arrastar"),
+                let view: &[(&str, &str)] = &[
+                    ("Aumentar / diminuir zoom", "Ctrl++ · Ctrl+-"),
+                    ("Redefinir zoom", "Ctrl+0"),
+                    ("Ajustar todos os elementos", "Shift+1"),
+                    ("Ajustar à seleção", "Shift+2 · Shift+3"),
+                    ("Rolar a página", "PgUp/PgDn · Shift+PgUp/PgDn"),
+                    ("Modo zen", "Alt+Z"),
+                    ("Grade", "Ctrl+'"),
+                    ("Modo de visualização", "Alt+R"),
+                    ("Tema escuro", "Alt+Shift+D"),
+                    ("Estatísticas", "Alt+/"),
+                    ("Mover a tela", "Espaço+arrastar · roda"),
+                    ("Atalhos de teclado", "?"),
+                ];
+                let editor: &[(&str, &str)] = &[
+                    ("Limpar o canvas", "Ctrl+Delete"),
+                    ("Apagar", "Delete"),
+                    ("Recortar / Copiar / Colar", "Ctrl+X / C / V"),
                     ("Selecionar tudo", "Ctrl+A"),
+                    ("Adicionar à seleção", "Shift+clique"),
+                    ("Copiar como PNG", "Shift+Alt+C"),
+                    ("Copiar / colar estilos", "Ctrl+Alt+C / V"),
+                    ("Enviar para trás / para o fundo", "Ctrl+[ · Ctrl+Shift+["),
+                    ("Trazer para frente / ao topo", "Ctrl+] · Ctrl+Shift+]"),
+                    ("Alinhar", "Ctrl+Shift+setas"),
+                    ("Duplicar", "Ctrl+D · Alt+arrastar"),
+                    ("Travar / destravar", "Ctrl+Shift+L"),
+                    ("Desfazer / Refazer", "Ctrl+Z / Ctrl+Shift+Z"),
                     ("Agrupar / Desagrupar", "Ctrl+G / Ctrl+Shift+G"),
-                    ("Camadas", "Ctrl+[ ]  (Shift: até o fim)"),
-                    ("Mover 1px / 5px", "Setas / Shift+Setas"),
-                    ("Proporção / ângulo 15°", "Shift ao desenhar"),
-                    ("Desenhar do centro", "Alt ao desenhar"),
-                    ("Zoom", "Ctrl+roda · Ctrl+ +/-/0 · Shift+1"),
-                    ("Salvar / Abrir", "Ctrl+S / Ctrl+O"),
+                    ("Inverter na horizontal / vertical", "Shift+H / Shift+V"),
+                    ("Cor do traço / do fundo", "S / G"),
+                    ("Diminuir / aumentar fonte", "Ctrl+Shift+< / >"),
+                    ("Mover 1px / 5px", "Setas / Shift+setas"),
+                    ("Salvar / Salvar como / Abrir", "Ctrl+S / Ctrl+Shift+S / Ctrl+O"),
                     ("Exportar imagem", "Ctrl+Shift+E"),
-                    ("Grade / Tema escuro", "Ctrl+' / Alt+Shift+D"),
                 ];
-                for (i, (col, rows)) in cols.iter_mut().zip([&rows_l[..], &rows_r[..]]).enumerate() {
-                    egui::Grid::new(("help_grid", i)).num_columns(2).spacing([12.0, 4.0]).show(col, |ui| {
+                let grid = |ui: &mut Ui, id: &str, title: &str, rows: &[(&str, &str)]| {
+                    ui.strong(title);
+                    egui::Grid::new(id).num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                         for (a, b) in rows {
                             ui.label(*a);
                             ui.label(RichText::new(*b).monospace().size(11.5));
                             ui.end_row();
                         }
                     });
-                }
+                };
+                grid(&mut cols[0], "help_tools", "Ferramentas", tools);
+                cols[0].add_space(8.0);
+                grid(&mut cols[0], "help_view", "Visualização", view);
+                grid(&mut cols[1], "help_editor", "Editor", editor);
             });
             ui.add_space(6.0);
             ui.label(
@@ -1314,6 +1357,31 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
 
 fn confirm_window(app: &mut App, ctx: &egui::Context) {
     let Some(pending) = app.confirm else { return };
+    if pending == Pending::Clear {
+        egui::Window::new("Limpar o canvas")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("Isto vai apagar todo o canvas. Você pode desfazer com Ctrl+Z.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Limpar").clicked() {
+                        app.confirm = None;
+                        app.clear_canvas();
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        app.confirm = None;
+                    }
+                });
+            });
+        return;
+    }
+    let run = |app: &mut App| match pending {
+        Pending::New => app.new_scene(),
+        Pending::Open => app.open_dialog(),
+        Pending::Clear => app.clear_canvas(),
+    };
     egui::Window::new("Alterações não salvas")
         .collapsible(false)
         .resizable(false)
@@ -1326,19 +1394,13 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
                     app.save();
                     if !app.dirty {
                         app.confirm = None;
-                        match pending {
-                            Pending::New => app.new_scene(),
-                            Pending::Open => app.open_dialog(),
-                        }
+                        run(app);
                     }
                 }
                 if ui.button("Descartar").clicked() {
                     app.dirty = false;
                     app.confirm = None;
-                    match pending {
-                        Pending::New => app.new_scene(),
-                        Pending::Open => app.open_dialog(),
-                    }
+                    run(app);
                 }
                 if ui.button("Cancelar").clicked() {
                     app.confirm = None;
@@ -1404,14 +1466,109 @@ fn hint(app: &App, ctx: &egui::Context) {
 }
 
 pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
-    toolbar(app, ctx, view);
-    hint(app, ctx);
-    props_panel(app, ctx);
-    menu(app, ctx);
+    if !app.view_mode {
+        toolbar(app, ctx, view);
+        hint(app, ctx);
+    }
+    if !app.view_mode && !app.zen_mode {
+        props_panel(app, ctx);
+        menu(app, ctx);
+    }
     bottom_bar(app, ctx, view);
+    mode_exit_button(app, ctx);
+    stats_window(app, ctx);
+    app.open_picker = None;
     text_editor(app, ctx);
     export_window(app, ctx);
     help_window(app, ctx);
     confirm_window(app, ctx);
     toast(app, ctx);
+}
+
+/// Botão para sair do modo zen (Alt+Z) ou de visualização (Alt+R).
+fn mode_exit_button(app: &mut App, ctx: &egui::Context) {
+    let label = if app.view_mode {
+        "Sair do modo de visualização (Alt+R)"
+    } else if app.zen_mode {
+        "Sair do modo zen (Alt+Z)"
+    } else {
+        return;
+    };
+    egui::Area::new(Id::unique("mode_exit"))
+        .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -14.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            panel_frame(ui)
+                .inner_margin(Margin::same(3))
+                .show(ui, |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(label)
+                                .frame(false)
+                                .min_size(vec2(0.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        if app.view_mode {
+                            app.toggle_view_mode();
+                        } else {
+                            app.zen_mode = false;
+                        }
+                    }
+                });
+        });
+}
+
+/// Painel de estatísticas (Alt+/).
+fn stats_window(app: &mut App, ctx: &egui::Context) {
+    if !app.show_stats {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Estatísticas")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::RIGHT_TOP, vec2(-12.0, 64.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            egui::Grid::new("stats_grid")
+                .num_columns(2)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut Ui, a: &str, b: String| {
+                        ui.label(a);
+                        ui.label(RichText::new(b).monospace());
+                        ui.end_row();
+                    };
+                    ui.strong("Canvas");
+                    ui.end_row();
+                    row(ui, "Elementos", app.elements.len().to_string());
+                    if let Some(b) = crate::geom::scene_bounds(app.elements.iter()) {
+                        row(ui, "Largura", format!("{:.0}", b.width()));
+                        row(ui, "Altura", format!("{:.0}", b.height()));
+                    }
+                    let sel = app.selected_elements();
+                    if sel.len() == 1 {
+                        let e = sel[0];
+                        ui.strong("Elemento");
+                        ui.end_row();
+                        row(ui, "X", format!("{:.0}", e.x));
+                        row(ui, "Y", format!("{:.0}", e.y));
+                        row(ui, "Largura", format!("{:.0}", e.width));
+                        row(ui, "Altura", format!("{:.0}", e.height));
+                        row(ui, "Ângulo", format!("{:.0}°", e.angle.to_degrees()));
+                    } else if sel.len() > 1 {
+                        ui.strong("Seleção");
+                        ui.end_row();
+                        row(ui, "Elementos", sel.len().to_string());
+                        if let Some(b) = crate::geom::scene_bounds(sel) {
+                            row(ui, "X", format!("{:.0}", b.min.x));
+                            row(ui, "Y", format!("{:.0}", b.min.y));
+                            row(ui, "Largura", format!("{:.0}", b.width()));
+                            row(ui, "Altura", format!("{:.0}", b.height()));
+                        }
+                    }
+                });
+        });
+    app.show_stats = open && app.show_stats;
 }
