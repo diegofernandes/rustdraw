@@ -1,0 +1,199 @@
+//! Desenho das primitivas na tela com o `egui::Painter`.
+
+use crate::fonts::Family;
+use crate::geom::{P, Prim, Rgba, rotate};
+use crate::model::dark_filter;
+use egui::epaint::TextShape;
+use egui::{Color32, FontFamily, FontId, Painter, Pos2, Shape, Stroke};
+
+/// Câmera: `tela = origem + (mundo + scroll) * zoom`.
+#[derive(Clone, Copy, Debug)]
+pub struct Cam {
+    pub scroll: P,
+    pub zoom: f32,
+    pub origin: Pos2,
+}
+
+impl Cam {
+    pub fn s(&self, p: P) -> Pos2 {
+        Pos2::new(
+            self.origin.x + (p.x + self.scroll.x) * self.zoom,
+            self.origin.y + (p.y + self.scroll.y) * self.zoom,
+        )
+    }
+    pub fn w(&self, s: Pos2) -> P {
+        P::new(
+            (s.x - self.origin.x) / self.zoom - self.scroll.x,
+            (s.y - self.origin.y) / self.zoom - self.scroll.y,
+        )
+    }
+}
+
+pub fn c32(c: Rgba, dark: bool, alpha_mul: f32) -> Color32 {
+    let c = if dark { dark_filter(c) } else { c };
+    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as f32 * alpha_mul).round() as u8)
+}
+
+pub fn font_family(fam: i64, hand_ok: bool) -> FontFamily {
+    match Family::from_excalidraw(fam) {
+        Family::Hand if hand_ok => FontFamily::Name("virgil".into()),
+        Family::Mono => FontFamily::Monospace,
+        _ => FontFamily::Proportional,
+    }
+}
+
+fn dash_split(pts: &[Pos2], on: f32, off: f32) -> Vec<Vec<Pos2>> {
+    let mut out = Vec::new();
+    if pts.len() < 2 || on <= 0.0 {
+        return out;
+    }
+    let mut cur = vec![pts[0]];
+    let mut drawing = true;
+    let mut remain = on;
+    for w in pts.windows(2) {
+        let (mut a, b) = (w[0], w[1]);
+        let mut seg = (b - a).length();
+        while seg > remain {
+            let m = a + (b - a) * (remain / seg);
+            if drawing {
+                cur.push(m);
+                out.push(std::mem::take(&mut cur));
+            } else {
+                cur = vec![m];
+            }
+            seg -= remain;
+            drawing = !drawing;
+            remain = if drawing { on } else { off.max(0.1) };
+            a = m;
+        }
+        remain -= seg;
+        if drawing {
+            cur.push(b);
+        }
+    }
+    if drawing && cur.len() > 1 {
+        out.push(cur);
+    }
+    out
+}
+
+pub struct PaintCtx<'a> {
+    pub painter: &'a Painter,
+    pub cam: Cam,
+    pub dark: bool,
+    pub alpha: f32,
+    pub hand_ok: bool,
+}
+
+pub fn paint_prims(pc: &PaintCtx, prims: &[Prim]) {
+    let z = pc.cam.zoom;
+    for prim in prims {
+        match prim {
+            Prim::Fill { pts, color } => {
+                if pts.len() < 3 {
+                    continue;
+                }
+                let spts: Vec<Pos2> = pts.iter().map(|p| pc.cam.s(*p)).collect();
+                pc.painter.add(Shape::convex_polygon(
+                    spts,
+                    c32(*color, pc.dark, pc.alpha),
+                    Stroke::NONE,
+                ));
+            }
+            Prim::Stroke {
+                pts,
+                color,
+                width,
+                dash,
+            } => {
+                if pts.is_empty() {
+                    continue;
+                }
+                let spts: Vec<Pos2> = pts.iter().map(|p| pc.cam.s(*p)).collect();
+                let col = c32(*color, pc.dark, pc.alpha);
+                let w = (width * z).max(0.5);
+                match dash {
+                    Some((on, off)) if *on < 2.0 => {
+                        // pontilhado: bolinhas
+                        for d in dash_split(&spts, (on * z).max(0.5), off * z) {
+                            pc.painter.circle_filled(d[0], w / 2.0, col);
+                        }
+                    }
+                    Some((on, off)) => {
+                        for d in dash_split(&spts, on * z, off * z) {
+                            pc.painter.add(Shape::line(d, Stroke::new(w, col)));
+                        }
+                    }
+                    None => {
+                        if w > 2.5 {
+                            // pontas arredondadas
+                            pc.painter.circle_filled(spts[0], w / 2.0, col);
+                            pc.painter.circle_filled(spts[spts.len() - 1], w / 2.0, col);
+                        }
+                        if spts.len() >= 2 {
+                            pc.painter.add(Shape::line(spts, Stroke::new(w, col)));
+                        }
+                    }
+                }
+            }
+            Prim::Text {
+                origin,
+                width,
+                text,
+                size,
+                family,
+                color,
+                align,
+                line_height,
+                angle,
+                center,
+            } => {
+                let px = size * z;
+                if px < 1.0 {
+                    continue;
+                }
+                let font = FontId::new(px, font_family(*family, pc.hand_ok));
+                let col = c32(*color, pc.dark, pc.alpha);
+                let lh = size * line_height;
+                for (i, line) in text.split('\n').enumerate() {
+                    let galley = pc
+                        .painter
+                        .layout_no_wrap(line.to_string(), font.clone(), col);
+                    let gw = galley.size().x / z;
+                    let gh = galley.size().y / z;
+                    let dx = match align {
+                        1 => (width - gw) / 2.0,
+                        2 => width - gw,
+                        _ => 0.0,
+                    };
+                    let top_left =
+                        P::new(origin.x + dx, origin.y + i as f32 * lh + (lh - gh) / 2.0);
+                    let pos = pc.cam.s(rotate(top_left, *center, *angle));
+                    pc.painter
+                        .add(TextShape::new(pos, galley, col).with_angle(*angle));
+                }
+            }
+        }
+    }
+}
+
+/// Mede um texto no tamanho de mundo: (largura, altura) usando a regra de
+/// altura de linha do Excalidraw.
+pub fn measure_text(
+    painter: &Painter,
+    text: &str,
+    size: f32,
+    fam: i64,
+    lh: f32,
+    hand_ok: bool,
+) -> (f32, f32) {
+    let font = FontId::new(size, font_family(fam, hand_ok));
+    let mut w: f32 = 0.0;
+    let mut n = 0;
+    for line in text.split('\n') {
+        let g = painter.layout_no_wrap(line.to_string(), font.clone(), Color32::BLACK);
+        w = w.max(g.size().x);
+        n += 1;
+    }
+    (w.max(1.0), (n as f32 * size * lh).max(size * lh))
+}
