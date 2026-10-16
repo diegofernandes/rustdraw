@@ -10,6 +10,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Visual "desenhado à mão"**: traços irregulares com os mesmos algoritmos do rough.js (o motor do Excalidraw), determinísticos por `seed`
 - **Estilos**: cor de traço e fundo, preenchimento (hachura, hachura cruzada, sólido), espessura, tracejado/pontilhado, "desleixo" (arquiteto/artista/cartunista), bordas arredondadas, opacidade, pontas de seta (seta, triângulo, barra, ponto), fonte (à mão/normal/código), tamanho e alinhamento
 - **Edição**: seleção por clique ou caixa, mover, redimensionar (inclusive girado), girar (Shift = passos de 15°), editar pontos de linhas, linhas ponto a ponto, duplicar (Ctrl+D ou Alt+arrastar), agrupar, camadas, borracha, desfazer/refazer
+- **Menu do botão direito**: como no Excalidraw, um menu para o canvas vazio (colar, copiar como PNG/SVG, selecionar tudo, destravar tudo, grade, modo zen, visualização, estatísticas) e outro para elementos (recortar, copiar, colar, estilos, agrupar, camadas, inverter, duplicar, travar, apagar), com os atalhos ao lado de cada item
 - **Setas que grudam nas formas**: a ponta da seta liga num retângulo, losango, elipse ou texto e acompanha a forma quando ela é movida, redimensionada ou girada. Perto do meio de um lado, encaixa nesse **ponto fixo**; no resto da forma fica **livre**, mirando o centro e parando no contorno. Segure `Ctrl` (`Cmd` no macOS) ao arrastar para não grudar; mover só a seta a solta
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
@@ -67,7 +68,7 @@ rustdraw export entrada.excalidraw saida.svg --dark --no-bg
 | Estatísticas | `Alt+/` | | Tamanho da fonte | `Ctrl+Shift+<` / `>` |
 | Ajustar à seleção | `Shift+2` / `Shift+3` | | Limpar o canvas | `Ctrl+Delete` |
 
-Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`.
+Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`. O botão direito abre o menu de opções.
 
 ## Arquitetura
 

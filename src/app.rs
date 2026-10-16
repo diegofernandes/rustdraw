@@ -124,6 +124,16 @@ struct Cached {
     bounds: Rect,
 }
 
+/// Menu de opções do botão direito, como o do Excalidraw.
+pub struct ContextMenu {
+    /// Posição na tela onde o menu abre.
+    pub pos: Pos2,
+    /// Clique sobre um elemento (menu do elemento) ou no canvas vazio.
+    pub on_element: bool,
+    /// Aberto neste quadro: o próprio clique que o abriu não deve fechá-lo.
+    pub fresh: bool,
+}
+
 pub struct App {
     pub elements: Vec<Element>,
     pub selected: HashSet<String>,
@@ -144,6 +154,9 @@ pub struct App {
     pub grid: bool,
     pub view_bg: String,
     pub show_menu: bool,
+    pub context_menu: Option<ContextMenu>,
+    /// Onde colar quando "Colar" vem do menu de contexto (e quando foi pedido).
+    paste_at: Option<(P, f64)>,
     pub show_export: bool,
     pub show_help: bool,
     pub show_stats: bool,
@@ -295,6 +308,8 @@ impl App {
             grid: false,
             view_bg: "#ffffff".into(),
             show_menu: false,
+            context_menu: None,
+            paste_at: None,
             show_export: false,
             show_help: false,
             show_stats: false,
@@ -738,9 +753,26 @@ impl App {
     }
 
     pub fn copy_svg(&mut self, ctx: &egui::Context) {
+        let els = self.export_elements();
+        self.copy_svg_of(ctx, &els);
+    }
+
+    /// Copia a seleção (ou tudo) como SVG — "Copiar como SVG" do menu de contexto.
+    pub fn copy_selection_svg(&mut self, ctx: &egui::Context) {
+        let els: Vec<Element> = if self.selected.is_empty() {
+            self.elements.clone()
+        } else {
+            self.selected_elements().into_iter().cloned().collect()
+        };
+        if !els.is_empty() {
+            self.copy_svg_of(ctx, &els);
+        }
+    }
+
+    fn copy_svg_of(&mut self, ctx: &egui::Context, els: &[Element]) {
         let mut opts = self.export_opts.clone();
         opts.view_background = self.view_bg.clone();
-        match export::render_svg(&self.export_elements(), &opts) {
+        match export::render_svg(els, &opts) {
             Ok(s) => {
                 ctx.copy_text(s);
                 self.toast("SVG copiado para a área de transferência");
@@ -842,7 +874,11 @@ impl App {
     }
 
     pub fn paste(&mut self, text: &str) {
-        let at = self.pointer_world;
+        // "Colar" do menu de contexto cola onde o menu foi aberto
+        let at = match self.paste_at.take() {
+            Some((p, t)) if self.now - t < 2.0 => p,
+            _ => self.pointer_world,
+        };
         let before = self.elements.clone();
         if let Ok(f) = SceneFile::parse(text) {
             if f.elements.is_empty() {
@@ -930,6 +966,115 @@ impl App {
         let before = std::mem::take(&mut self.elements);
         self.selected.clear();
         self.commit(before);
+    }
+
+    /// "Destravar tudo" (menu de contexto): destrava e seleciona os travados.
+    pub fn unlock_all(&mut self) {
+        if !self.has_locked() {
+            return;
+        }
+        let before = self.elements.clone();
+        self.finish_editing();
+        self.tool = Tool::Select;
+        self.selected.clear();
+        for e in self.elements.iter_mut().filter(|e| e.locked) {
+            e.locked = false;
+            e.touch();
+            self.selected.insert(e.id.clone());
+        }
+        self.commit(before);
+    }
+
+    pub fn has_locked(&self) -> bool {
+        self.elements.iter().any(|e| e.locked)
+    }
+
+    /// Todos os selecionados estão travados (o menu oferece "Destravar").
+    pub fn selection_locked(&self) -> bool {
+        let sel = self.selected_elements();
+        !sel.is_empty() && sel.iter().all(|e| e.locked)
+    }
+
+    /// Agrupar só faz sentido se a seleção ainda não for um único grupo
+    /// (mesma regra do Excalidraw).
+    pub fn can_group(&self) -> bool {
+        let sel = self.selected_elements();
+        if sel.len() < 2 {
+            return false;
+        }
+        !sel[0]
+            .group_ids
+            .iter()
+            .any(|g| sel.iter().all(|e| e.group_ids.contains(g)))
+    }
+
+    pub fn can_ungroup(&self) -> bool {
+        self.selected_elements()
+            .iter()
+            .any(|e| !e.group_ids.is_empty())
+    }
+
+    /// Texto dos elementos de texto selecionados, na ordem do desenho.
+    pub fn selected_text(&self) -> String {
+        self.elements
+            .iter()
+            .filter(|e| e.kind == "text" && self.selected.contains(&e.id))
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// "Copiar texto": copia só o texto, como texto simples.
+    pub fn copy_text(&mut self, ctx: &egui::Context) {
+        let t = self.selected_text();
+        if !t.is_empty() {
+            ctx.copy_text(t);
+            self.toast("Texto copiado para a área de transferência");
+        }
+    }
+
+    pub fn cut_selection(&mut self, ctx: &egui::Context) {
+        self.copy_selection(ctx);
+        self.delete_selected();
+    }
+
+    /// "Colar" do menu: pede a área de transferência ao sistema; o texto chega
+    /// como evento de colar no próximo quadro e vai para `at`.
+    pub fn paste_at(&mut self, ctx: &egui::Context, at: P) {
+        self.paste_at = Some((at, self.now));
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        ctx.request_repaint();
+    }
+
+    /// Abre o menu do botão direito. Sobre um elemento fora da seleção,
+    /// seleciona-o (com o grupo) antes, como no Excalidraw.
+    pub fn open_context_menu(&mut self, p: P, screen: Pos2) {
+        self.finish_editing();
+        self.finish_linear();
+        self.show_menu = false;
+        let mut on_element = false;
+        if !self.view_mode {
+            let in_sel_box = self.selected.len() > 1
+                && self
+                    .selection_bounds()
+                    .is_some_and(|b| b.expand(4.0 / self.cam.zoom).contains(p));
+            if in_sel_box {
+                on_element = true;
+            } else if let Some(i) = self.element_at(p) {
+                if !self.selected.contains(&self.elements[i].id) {
+                    if self.tool != Tool::Select {
+                        self.set_tool(Tool::Select);
+                    }
+                    self.selected = self.group_of(i);
+                }
+                on_element = true;
+            }
+        }
+        self.context_menu = Some(ContextMenu {
+            pos: screen,
+            on_element,
+            fresh: true,
+        });
     }
 
     /// Ctrl+Shift+L: trava ou destrava os elementos selecionados.
@@ -1499,23 +1644,39 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn handle_pointer(&mut self, ctx: &egui::Context, resp: &egui::Response) {
-        let (pos, pressed, released, down, mid_pressed, mid_down, scroll, zoom_delta, mods, dbl) =
-            ctx.input(|i| {
-                (
-                    i.pointer.latest_pos(),
-                    i.pointer.primary_pressed(),
-                    i.pointer.primary_released(),
-                    i.pointer.primary_down(),
-                    i.pointer.button_pressed(PointerButton::Middle),
-                    i.pointer.middle_down(),
-                    i.smooth_scroll_delta,
-                    i.zoom_delta(),
-                    i.modifiers,
-                    i.pointer.button_double_clicked(PointerButton::Primary),
-                )
-            });
+        let (
+            pos,
+            pressed,
+            released,
+            down,
+            mid_pressed,
+            mid_down,
+            right_pressed,
+            scroll,
+            zoom_delta,
+            mods,
+            dbl,
+        ) = ctx.input(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_released(),
+                i.pointer.primary_down(),
+                i.pointer.button_pressed(PointerButton::Middle),
+                i.pointer.middle_down(),
+                i.pointer.secondary_pressed(),
+                i.smooth_scroll_delta,
+                i.zoom_delta(),
+                i.modifiers,
+                i.pointer.button_double_clicked(PointerButton::Primary),
+            )
+        });
         let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
         let over = resp.contains_pointer();
+        if over && self.context_menu.is_some() && (zoom_delta != 1.0 || scroll != egui::Vec2::ZERO)
+        {
+            self.context_menu = None;
+        }
         if over {
             if zoom_delta != 1.0 {
                 if let Some(p) = pos {
@@ -1530,6 +1691,15 @@ impl App {
         let Some(pos) = pos else { return };
         let wp = self.cam.w(pos);
         self.pointer_world = wp;
+
+        // menu de contexto: um clique fora só fecha o menu
+        if over && (pressed || mid_pressed) && self.context_menu.take().is_some() {
+            return;
+        }
+        if over && right_pressed && matches!(self.drag, Drag::None | Drag::LinearMulti { .. }) {
+            self.open_context_menu(wp, pos);
+            return;
+        }
 
         // pan com botão do meio
         if over && mid_pressed {
@@ -2027,10 +2197,7 @@ impl App {
             match ev {
                 _ if typing || self.view_mode => {}
                 egui::Event::Copy => self.copy_selection(ctx),
-                egui::Event::Cut => {
-                    self.copy_selection(ctx);
-                    self.delete_selected();
-                }
+                egui::Event::Cut => self.cut_selection(ctx),
                 egui::Event::Paste(t) => self.paste(t),
                 _ => {}
             }
@@ -2047,6 +2214,12 @@ impl App {
             return;
         }
         if typing {
+            return;
+        }
+        if self.context_menu.is_some()
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.context_menu = None;
             return;
         }
         let n = Modifiers::NONE;

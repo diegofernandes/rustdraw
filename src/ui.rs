@@ -994,6 +994,243 @@ fn menu(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Ações do menu de contexto.
+#[derive(Clone, Copy)]
+enum Act {
+    Cut,
+    Copy,
+    Paste,
+    CopyPng,
+    CopySvg,
+    CopyText,
+    SelectAll,
+    UnlockAll,
+    Grid,
+    Zen,
+    ViewMode,
+    Stats,
+    CopyStyles,
+    PasteStyles,
+    Group,
+    Ungroup,
+    SendBackward,
+    BringForward,
+    SendToBack,
+    BringToFront,
+    FlipH,
+    FlipV,
+    Duplicate,
+    Lock,
+    Delete,
+}
+
+enum Entry {
+    Sep,
+    /// Rótulo, atalho, ação e, para as opções liga/desliga, se está ligada.
+    Item(&'static str, &'static str, Act, Option<bool>),
+}
+
+/// Itens do menu do botão direito, na mesma ordem do Excalidraw
+/// (`App.tsx`, `getContextMenuItems`). Ficam de fora os itens de recursos que o
+/// RustDraw ainda não tem (frames, biblioteca, links, recorte de imagem...).
+fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
+    use Entry::{Item, Sep};
+    let has_elements = !app.elements.is_empty();
+    let has_text = !app.selected_text().is_empty();
+    let toggles = [
+        Item("Grade", "Ctrl+'", Act::Grid, Some(app.grid)),
+        Item("Modo zen", "Alt+Z", Act::Zen, Some(app.zen_mode)),
+        Item(
+            "Modo de visualização",
+            "Alt+R",
+            Act::ViewMode,
+            Some(app.view_mode),
+        ),
+        Item("Estatísticas", "Alt+/", Act::Stats, Some(app.show_stats)),
+    ];
+    let mut v = vec![];
+    if app.view_mode {
+        v.extend(toggles);
+    } else if !on_element {
+        v.push(Item("Colar", "Ctrl+V", Act::Paste, None));
+        v.push(Sep);
+        if has_elements {
+            v.push(Item("Copiar como PNG", "Shift+Alt+C", Act::CopyPng, None));
+            v.push(Item("Copiar como SVG", "", Act::CopySvg, None));
+        }
+        if has_text {
+            v.push(Item("Copiar texto", "", Act::CopyText, None));
+        }
+        v.push(Sep);
+        v.push(Item("Selecionar tudo", "Ctrl+A", Act::SelectAll, None));
+        if app.has_locked() {
+            v.push(Item("Destravar tudo", "", Act::UnlockAll, None));
+        }
+        v.push(Sep);
+        v.extend(toggles);
+    } else {
+        // no macOS, "até o fim" é Cmd+Alt+[ ]; nos demais, Ctrl+Shift+[ ]
+        let (to_back, to_front) = if cfg!(target_os = "macos") {
+            ("Ctrl+Alt+[", "Ctrl+Alt+]")
+        } else {
+            ("Ctrl+Shift+[", "Ctrl+Shift+]")
+        };
+        v.extend([
+            Item("Recortar", "Ctrl+X", Act::Cut, None),
+            Item("Copiar", "Ctrl+C", Act::Copy, None),
+            Item("Colar", "Ctrl+V", Act::Paste, None),
+            Sep,
+            Item("Copiar como PNG", "Shift+Alt+C", Act::CopyPng, None),
+            Item("Copiar como SVG", "", Act::CopySvg, None),
+        ]);
+        if has_text {
+            v.push(Item("Copiar texto", "", Act::CopyText, None));
+        }
+        v.extend([
+            Sep,
+            Item("Copiar estilos", "Ctrl+Alt+C", Act::CopyStyles, None),
+            Item("Colar estilos", "Ctrl+Alt+V", Act::PasteStyles, None),
+            Sep,
+        ]);
+        if app.can_group() {
+            v.push(Item("Agrupar seleção", "Ctrl+G", Act::Group, None));
+        }
+        if app.can_ungroup() {
+            v.push(Item("Desagrupar", "Ctrl+Shift+G", Act::Ungroup, None));
+        }
+        let lock = if app.selection_locked() {
+            "Destravar"
+        } else {
+            "Travar"
+        };
+        v.extend([
+            Sep,
+            Item("Enviar para trás", "Ctrl+[", Act::SendBackward, None),
+            Item("Trazer para frente", "Ctrl+]", Act::BringForward, None),
+            Item("Enviar para o fundo", to_back, Act::SendToBack, None),
+            Item("Trazer ao topo", to_front, Act::BringToFront, None),
+            Sep,
+            Item("Inverter na horizontal", "Shift+H", Act::FlipH, None),
+            Item("Inverter na vertical", "Shift+V", Act::FlipV, None),
+            Sep,
+            Item("Duplicar", "Ctrl+D", Act::Duplicate, None),
+            Item(lock, "Ctrl+Shift+L", Act::Lock, None),
+            Sep,
+            Item("Apagar", "Delete", Act::Delete, None),
+        ]);
+    }
+    // sem separadores no começo, no fim ou repetidos
+    let mut out: Vec<Entry> = vec![];
+    for e in v {
+        if matches!(e, Sep) && matches!(out.last(), None | Some(Sep)) {
+            continue;
+        }
+        out.push(e);
+    }
+    if matches!(out.last(), Some(Sep)) {
+        out.pop();
+    }
+    out
+}
+
+fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
+    match act {
+        Act::Cut => app.cut_selection(ctx),
+        Act::Copy => app.copy_selection(ctx),
+        Act::Paste => {
+            let p = app.cam.w(at);
+            app.paste_at(ctx, p);
+        }
+        Act::CopyPng => app.copy_png(ctx),
+        Act::CopySvg => app.copy_selection_svg(ctx),
+        Act::CopyText => app.copy_text(ctx),
+        Act::SelectAll => app.select_all(),
+        Act::UnlockAll => app.unlock_all(),
+        Act::Grid => app.grid = !app.grid,
+        Act::Zen => app.zen_mode = !app.zen_mode,
+        Act::ViewMode => app.toggle_view_mode(),
+        Act::Stats => app.show_stats = !app.show_stats,
+        Act::CopyStyles => app.copy_styles(),
+        Act::PasteStyles => app.paste_styles(),
+        Act::Group => app.group_selected(true),
+        Act::Ungroup => app.group_selected(false),
+        Act::SendBackward => app.reorder(false, false),
+        Act::BringForward => app.reorder(true, false),
+        Act::SendToBack => app.reorder(false, true),
+        Act::BringToFront => app.reorder(true, true),
+        Act::FlipH => app.flip_selected(true),
+        Act::FlipV => app.flip_selected(false),
+        Act::Duplicate => app.duplicate_selected(),
+        Act::Lock => app.toggle_lock(),
+        Act::Delete => app.delete_selected(),
+    }
+}
+
+/// Menu do botão direito: um para o canvas vazio e outro para elementos.
+fn context_menu(app: &mut App, ctx: &egui::Context) {
+    let Some(cm) = &app.context_menu else { return };
+    let (at, fresh) = (cm.pos, cm.fresh);
+    let entries = context_entries(app, cm.on_element);
+    let mut chosen = None;
+    let resp = egui::Area::new(Id::unique("context_menu"))
+        .fixed_pos(at)
+        .order(egui::Order::Foreground)
+        .constrain(true)
+        .show(ctx, |ui| {
+            panel_frame(ui).show(ui, |ui| {
+                ui.set_width(250.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let danger = ui.visuals().error_fg_color;
+                for e in &entries {
+                    match *e {
+                        Entry::Sep => {
+                            ui.add_space(3.0);
+                            ui.separator();
+                            ui.add_space(3.0);
+                        }
+                        Entry::Item(label, shortcut, act, checked) => {
+                            let text = match checked {
+                                Some(true) => RichText::new(format!("✔ {label}")),
+                                _ => RichText::new(label),
+                            };
+                            let text = if matches!(act, Act::Delete) {
+                                text.color(danger)
+                            } else {
+                                text
+                            };
+                            let r = ui.add(
+                                egui::Button::new(text)
+                                    .shortcut_text(shortcut)
+                                    .frame(false)
+                                    .min_size(vec2(250.0, 26.0)),
+                            );
+                            if r.clicked() {
+                                chosen = Some(act);
+                            }
+                        }
+                    }
+                }
+            });
+        })
+        .response;
+    if let Some(cm) = &mut app.context_menu {
+        cm.fresh = false;
+    }
+    if let Some(act) = chosen {
+        app.context_menu = None;
+        run_act(app, ctx, act, at);
+        return;
+    }
+    // clique em outro painel fecha o menu (no canvas, `handle_pointer` cuida disso)
+    let pressed_outside = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .pointer_interact_pos()
+            .is_some_and(|p| !resp.rect.contains(p));
+    if pressed_outside && !fresh {
+        app.context_menu = None;
+    }
+}
+
 fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
     egui::Area::new(Id::unique("zoom"))
         .anchor(Align2::LEFT_BOTTOM, vec2(12.0, -12.0))
@@ -1330,6 +1567,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Seta sem grudar na forma", "Ctrl+arrastar"),
                     ("Salvar / Salvar como / Abrir", "Ctrl+S / Ctrl+Shift+S / Ctrl+O"),
                     ("Exportar imagem", "Ctrl+Shift+E"),
+                    ("Menu de opções", "Botão direito"),
                 ];
                 let grid = |ui: &mut Ui, id: &str, title: &str, rows: &[(&str, &str)]| {
                     ui.strong(title);
@@ -1475,6 +1713,7 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
     export_window(app, ctx);
     help_window(app, ctx);
     confirm_window(app, ctx);
+    context_menu(app, ctx);
     toast(app, ctx);
 }
 
