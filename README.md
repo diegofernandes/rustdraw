@@ -14,9 +14,17 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
 - **Conforto**: tema escuro, grade com encaixe, zoom no cursor, salvamento automático (o desenho volta ao reabrir), arrastar arquivo para a janela
 
-## Instalar e rodar
+## Baixar
 
-Pré-requisito: [Rust](https://rustup.rs) 1.85 ou mais recente.
+Binários prontos para **Linux** (x86_64), **Windows** (x86_64) e **macOS** (universal: Apple Silicon e Intel) ficam na página de [Releases](https://github.com/diegofernandes/rustdraw/releases). Basta extrair e rodar `rustdraw` (`rustdraw.exe` no Windows).
+
+> No macOS o binário não é assinado: na primeira vez, clique com o botão direito → Abrir, ou rode `xattr -d com.apple.quarantine rustdraw`.
+
+Para publicar uma nova versão: atualize `version` no `Cargo.toml`, faça o commit e crie a tag correspondente (`git tag v0.2.0 && git push origin v0.2.0`). O workflow `Release` compila as três plataformas e publica a release com os pacotes e o `SHA256SUMS.txt`.
+
+## Compilar do código-fonte
+
+Pré-requisito: [Rust](https://rustup.rs) 1.95 ou mais recente.
 
 ```bash
 git clone https://github.com/diegofernandes/rustdraw
