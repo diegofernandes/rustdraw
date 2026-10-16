@@ -167,6 +167,30 @@ pub struct App {
     pending_fit: bool,
     needs_measure: HashSet<String>,
     last_prefs: Option<(bool, bool, String)>,
+    /// Diálogo de arquivos aberto, aguardando a escolha do usuário.
+    dialog: Option<DialogTask>,
+    ctx: egui::Context,
+}
+
+/// O que fazer com o caminho escolhido no diálogo de arquivos.
+enum DialogKind {
+    Open,
+    /// Salvar e, se der certo, seguir com a ação adiada pela confirmação.
+    Save(Option<Pending>),
+    Export {
+        svg: bool,
+        els: Vec<Element>,
+        opts: ExportOpts,
+        base: String,
+    },
+}
+
+/// `Err(())` = o sistema não tem diálogo de arquivos (ver [`NO_DIALOG`]).
+type DialogResult = Result<Option<PathBuf>, ()>;
+
+struct DialogTask {
+    kind: DialogKind,
+    rx: std::sync::mpsc::Receiver<DialogResult>,
 }
 
 /// Caminho livre em ~/Documentos (usado quando não há diálogo de arquivos no sistema).
@@ -184,16 +208,30 @@ fn fallback_path(stem: &str, ext: &str) -> Option<PathBuf> {
         .find(|p| !p.exists())
 }
 
-/// Abre um diálogo nativo. Retorna `Err(())` se o sistema não tem diálogo
-/// disponível (ex.: Linux sem xdg-desktop-portal nem zenity).
-fn run_dialog<T>(f: impl FnOnce() -> Option<T>) -> Result<Option<T>, ()> {
-    let t = std::time::Instant::now();
-    let r = f();
-    if r.is_none() && t.elapsed() < std::time::Duration::from_millis(120) {
-        Err(())
-    } else {
-        Ok(r)
-    }
+/// Espera o diálogo nativo numa thread e devolve o resultado pelo canal.
+///
+/// O diálogo é assíncrono porque, no macOS, o diálogo síncrono roda um loop
+/// modal dentro do tratamento de evento do winit, que entra em pânico com
+/// "tried to handle event while another event is currently being handled".
+fn spawn_dialog(
+    ctx: &egui::Context,
+    fut: impl std::future::Future<Output = Option<rfd::FileHandle>> + Send + 'static,
+) -> std::sync::mpsc::Receiver<DialogResult> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let t = std::time::Instant::now();
+        let r = pollster::block_on(fut).map(|h| h.path().to_path_buf());
+        // sem diálogo no sistema, o rfd devolve `None` na hora
+        let r = if r.is_none() && t.elapsed() < std::time::Duration::from_millis(120) {
+            Err(())
+        } else {
+            Ok(r)
+        };
+        let _ = tx.send(r);
+        ctx.request_repaint();
+    });
+    rx
 }
 
 const NO_DIALOG: &str =
@@ -272,6 +310,8 @@ impl App {
             pending_fit: false,
             needs_measure: HashSet::new(),
             last_prefs: None,
+            dialog: None,
+            ctx: cc.egui_ctx.clone(),
         };
         if let Some(p) = open {
             app.load_path(&p);
@@ -413,15 +453,89 @@ impl App {
             self.confirm = Some(Pending::Open);
             return;
         }
-        let dlg = rfd::FileDialog::new()
+        let fut = rfd::AsyncFileDialog::new()
             .set_title("Abrir desenho")
-            .add_filter("Excalidraw", &["excalidraw", "json"]);
-        match run_dialog(|| dlg.pick_file()) {
-            Ok(Some(p)) => self.load_path(&p),
-            Ok(None) => {}
-            Err(()) => self.toast(format!(
-                "{NO_DIALOG}. Dica: arraste o arquivo para a janela."
-            )),
+            .add_filter("Excalidraw", &["excalidraw", "json"])
+            .pick_file();
+        self.start_dialog(DialogKind::Open, fut);
+    }
+
+    /// Mostra o diálogo, a não ser que já haja um aberto.
+    fn start_dialog(
+        &mut self,
+        kind: DialogKind,
+        fut: impl std::future::Future<Output = Option<rfd::FileHandle>> + Send + 'static,
+    ) {
+        if self.dialog.is_none() {
+            let rx = spawn_dialog(&self.ctx, fut);
+            self.dialog = Some(DialogTask { kind, rx });
+        }
+    }
+
+    fn poll_dialog(&mut self) {
+        let Some(task) = &self.dialog else { return };
+        let r = match task.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),
+        };
+        let Some(task) = self.dialog.take() else {
+            return;
+        };
+        match task.kind {
+            DialogKind::Open => match r {
+                Ok(Some(p)) => self.load_path(&p),
+                Ok(None) => {}
+                Err(()) => self.toast(format!(
+                    "{NO_DIALOG}. Dica: arraste o arquivo para a janela."
+                )),
+            },
+            DialogKind::Save(then) => {
+                let picked = r.unwrap_or_else(|()| fallback_path("desenho", "excalidraw"));
+                if let Some(mut p) = picked {
+                    if p.extension().is_none() {
+                        p.set_extension("excalidraw");
+                    }
+                    self.write_to(&p);
+                }
+                match then {
+                    Some(next) if !self.dirty => self.run_pending(next),
+                    // cancelado ou erro: volta à pergunta
+                    Some(next) => self.confirm = Some(next),
+                    None => {}
+                }
+            }
+            DialogKind::Export {
+                svg,
+                els,
+                opts,
+                base,
+            } => {
+                let ext = if svg { "svg" } else { "png" };
+                let Some(path) = r.unwrap_or_else(|()| fallback_path(&base, ext)) else {
+                    return;
+                };
+                let res = if svg {
+                    export::render_svg(&els, &opts)
+                        .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
+                } else {
+                    export::render_png(&els, &opts)
+                        .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
+                };
+                match res {
+                    Ok(()) => self.toast(format!("Exportado: {}", path.display())),
+                    Err(e) => self.toast(format!("Erro ao exportar: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Executa a ação que esperava a confirmação de alterações não salvas.
+    pub fn run_pending(&mut self, p: Pending) {
+        match p {
+            Pending::New => self.new_scene(),
+            Pending::Open => self.open_dialog(),
+            Pending::Clear => self.clear_canvas(),
         }
     }
 
@@ -438,32 +552,40 @@ impl App {
     }
 
     pub fn save(&mut self) {
+        self.save_then(None);
+    }
+
+    /// Salva e depois executa `then` (se o salvamento der certo).
+    pub fn save_then(&mut self, then: Option<Pending>) {
         match self.file_path.clone() {
-            Some(p) => self.write_to(&p),
-            None => self.save_as(),
+            Some(p) => {
+                self.write_to(&p);
+                match then {
+                    Some(next) if !self.dirty => self.run_pending(next),
+                    Some(next) => self.confirm = Some(next),
+                    None => {}
+                }
+            }
+            None => self.save_as_then(then),
         }
     }
 
     pub fn save_as(&mut self) {
+        self.save_as_then(None);
+    }
+
+    fn save_as_then(&mut self, then: Option<Pending>) {
         let name = self
             .file_path
             .as_deref()
             .map(file_name)
             .unwrap_or_else(|| "desenho.excalidraw".into());
-        let dlg = rfd::FileDialog::new()
+        let fut = rfd::AsyncFileDialog::new()
             .set_title("Salvar desenho")
             .add_filter("Excalidraw", &["excalidraw"])
-            .set_file_name(name);
-        let picked = match run_dialog(|| dlg.save_file()) {
-            Ok(p) => p,
-            Err(()) => fallback_path("desenho", "excalidraw"),
-        };
-        if let Some(mut p) = picked {
-            if p.extension().is_none() {
-                p.set_extension("excalidraw");
-            }
-            self.write_to(&p);
-        }
+            .set_file_name(name)
+            .save_file();
+        self.start_dialog(DialogKind::Save(then), fut);
     }
 
     fn write_to(&mut self, p: &std::path::Path) {
@@ -530,26 +652,20 @@ impl App {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "desenho".into());
         let (ext, label) = if svg { ("svg", "SVG") } else { ("png", "PNG") };
-        let dlg = rfd::FileDialog::new()
+        let fut = rfd::AsyncFileDialog::new()
             .set_title(format!("Exportar {label}"))
             .add_filter(label, &[ext])
-            .set_file_name(format!("{base}.{ext}"));
-        let picked = match run_dialog(|| dlg.save_file()) {
-            Ok(p) => p,
-            Err(()) => fallback_path(&base, ext),
-        };
-        let Some(path) = picked else { return };
-        let res = if svg {
-            export::render_svg(&els, &opts)
-                .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
-        } else {
-            export::render_png(&els, &opts)
-                .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
-        };
-        match res {
-            Ok(()) => self.toast(format!("Exportado: {}", path.display())),
-            Err(e) => self.toast(format!("Erro ao exportar: {e}")),
-        }
+            .set_file_name(format!("{base}.{ext}"))
+            .save_file();
+        self.start_dialog(
+            DialogKind::Export {
+                svg,
+                els,
+                opts,
+                base,
+            },
+            fut,
+        );
     }
 
     pub fn copy_svg(&mut self, ctx: &egui::Context) {
@@ -2266,6 +2382,7 @@ impl App {
 
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.now = ctx.input(|i| i.time);
+        self.poll_dialog();
         let prefs = (self.dark, self.grid, self.view_bg.clone());
         if self.last_prefs.as_ref() != Some(&prefs) {
             if self.last_prefs.is_some() {

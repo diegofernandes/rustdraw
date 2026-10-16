@@ -2016,13 +2016,14 @@ dependencies = [
 
 [[package]]
 name = "rustdraw"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "eframe",
  "egui",
  "epaint_default_fonts",
  "fontdue",
+ "pollster",
  "rfd",
  "serde",
  "serde_json",
