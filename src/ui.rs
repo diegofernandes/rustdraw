@@ -1327,6 +1327,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Cor do traço / do fundo", "S / G"),
                     ("Diminuir / aumentar fonte", "Ctrl+Shift+< / >"),
                     ("Mover 1px / 5px", "Setas / Shift+setas"),
+                    ("Seta sem grudar na forma", "Ctrl+arrastar"),
                     ("Salvar / Salvar como / Abrir", "Ctrl+S / Ctrl+Shift+S / Ctrl+O"),
                     ("Exportar imagem", "Ctrl+Shift+E"),
                 ];

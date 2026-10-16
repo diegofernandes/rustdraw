@@ -296,6 +296,27 @@ fn diamond_points(b: &Rect) -> Vec<P> {
     ]
 }
 
+/// Contorno fechado de uma forma (sem rotação, coordenadas de mundo), usado
+/// para ligar setas. `None` para elementos que não têm contorno fechado.
+pub fn outline(el: &Element) -> Option<Vec<P>> {
+    let b = local_box(el);
+    Some(match el.kind.as_str() {
+        "rectangle" if el.is_round() => {
+            let r = corner_radius(el).min(b.width() / 2.0).min(b.height() / 2.0);
+            rounded_rect_outline(&b, r)
+        }
+        "rectangle" | "text" => vec![
+            b.min,
+            P::new(b.max.x, b.min.y),
+            b.max,
+            P::new(b.min.x, b.max.y),
+        ],
+        "diamond" => diamond_points(&b),
+        "ellipse" => ellipse_outline(b.center(), b.width() / 2.0, b.height() / 2.0),
+        _ => return None,
+    })
+}
+
 /// Converte um elemento em primitivas (coordenadas de mundo, já rotacionadas).
 pub fn element_prims(el: &Element) -> Vec<Prim> {
     let opacity = (el.opacity as f32 / 100.0).clamp(0.0, 1.0);

@@ -1,5 +1,6 @@
 //! Estado do editor, entrada de ponteiro/teclado e ações.
 
+use crate::binding::{self, Binding, Candidate};
 use crate::export::{self, ExportOpts};
 use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
@@ -170,6 +171,12 @@ pub struct App {
     /// Diálogo de arquivos aberto, aguardando a escolha do usuário.
     dialog: Option<DialogTask>,
     ctx: egui::Context,
+    /// Forma (e ponto de encaixe) onde a ponta da seta vai ligar, para destacar.
+    pub bind_hint: Option<Candidate>,
+    /// Estado das setas ligadas já vistas (ver `binding::sync`).
+    bind_seen: HashMap<String, Vec<i64>>,
+    /// Modificadores do último quadro (Ctrl/Cmd desliga a ligação de setas).
+    mods: Modifiers,
 }
 
 /// O que fazer com o caminho escolhido no diálogo de arquivos.
@@ -312,6 +319,9 @@ impl App {
             last_prefs: None,
             dialog: None,
             ctx: cc.egui_ctx.clone(),
+            bind_hint: None,
+            bind_seen: HashMap::new(),
+            mods: Modifiers::NONE,
         };
         if let Some(p) = open {
             app.load_path(&p);
@@ -360,6 +370,8 @@ impl App {
 
     /// Registra um passo no histórico (`before` = estado antes da ação).
     pub fn commit(&mut self, before: Vec<Element>) {
+        self.sync_bindings();
+        binding::tidy(&mut self.elements);
         if before == self.elements {
             return;
         }
@@ -369,6 +381,61 @@ impl App {
         }
         self.redo.clear();
         self.mark_changed();
+    }
+
+    /// Faz as setas ligadas acompanharem as formas que mudaram.
+    pub fn sync_bindings(&mut self) {
+        binding::sync(&mut self.elements, &mut self.bind_seen);
+    }
+
+    /// Solta as pontas de setas de `moved` cuja forma ficou para trás
+    /// (a seta foi movida sozinha, como no Excalidraw).
+    fn unbind_detached(&mut self, moved: &HashSet<String>) {
+        for e in self
+            .elements
+            .iter_mut()
+            .filter(|e| e.kind == "arrow" && moved.contains(&e.id))
+        {
+            let mut changed = false;
+            for end in [false, true] {
+                if binding::get(e, end).is_some_and(|b| !moved.contains(&b.element_id)) {
+                    binding::set(e, end, None);
+                    changed = true;
+                }
+            }
+            if changed {
+                e.touch();
+            }
+        }
+    }
+
+    /// Escolhe onde a ponta `end` da seta `id` liga, estando em `p`.
+    /// Com Ctrl/Cmd, não liga.
+    fn bind_end_at(&mut self, id: &str, end: bool, p: P, mods: Modifiers) {
+        let Some(el) = self.elements.iter().find(|e| e.id == id) else {
+            return;
+        };
+        if el.kind != "arrow" {
+            return;
+        }
+        let other = binding::get(el, !end);
+        let cand = if mods.command {
+            None
+        } else {
+            binding::candidate(&self.elements, p, self.cam.zoom, id).filter(|c| {
+                // as duas pontas na mesma forma só entre pontos fixos
+                other.as_ref().is_none_or(|o| {
+                    o.element_id != c.id || (o.fixed.is_some() && c.fixed.is_some())
+                })
+            })
+        };
+        let b = cand.as_ref().map(|c| Binding::new(&c.id, c.fixed));
+        if let Some(el) = self.get_mut(id) {
+            binding::set(el, end, b.as_ref());
+            el.touch();
+        }
+        binding::refresh_arrow(&mut self.elements, id);
+        self.bind_hint = cand;
     }
 
     fn mark_changed(&mut self) {
@@ -416,6 +483,8 @@ impl App {
         self.view_bg = f.view_background().unwrap_or_else(|| "#ffffff".into());
         self.grid = f.grid_enabled();
         self.elements = f.elements;
+        self.bind_seen.clear();
+        self.bind_hint = None;
         self.selected.clear();
         self.undo.clear();
         self.redo.clear();
@@ -715,10 +784,11 @@ impl App {
     /// Copia elementos com novos ids/seeds, remapeando grupos.
     fn clone_with_new_ids(els: &[Element], offset: P) -> Vec<Element> {
         let mut groups: HashMap<String, String> = HashMap::new();
+        let ids: HashMap<&str, String> = els.iter().map(|e| (e.id.as_str(), new_id())).collect();
         els.iter()
             .map(|e| {
                 let mut n = e.clone();
-                n.id = new_id();
+                n.id = ids[e.id.as_str()].clone();
                 n.seed = rand_seed();
                 n.x += offset.x as f64;
                 n.y += offset.y as f64;
@@ -728,9 +798,22 @@ impl App {
                     .map(|g| groups.entry(g.clone()).or_insert_with(new_id).clone())
                     .collect();
                 n.bound_elements = None;
-                for k in ["startBinding", "endBinding", "containerId"] {
-                    if n.extra.contains_key(k) {
-                        n.extra.insert(k.into(), serde_json::Value::Null);
+                if n.extra.contains_key("containerId") {
+                    n.extra
+                        .insert("containerId".into(), serde_json::Value::Null);
+                }
+                // ligações só sobrevivem se a forma também foi copiada
+                for end in [false, true] {
+                    if let Some(mut b) = binding::get(e, end)
+                        && let Some(new) = ids.get(b.element_id.as_str())
+                    {
+                        b.element_id = new.clone();
+                        binding::set(&mut n, end, Some(&b));
+                    } else if n
+                        .extra
+                        .contains_key(if end { "endBinding" } else { "startBinding" })
+                    {
+                        binding::set(&mut n, end, None);
                     }
                 }
                 n.touch();
@@ -881,8 +964,10 @@ impl App {
         } else {
             (b.min.y + b.max.y) as f64
         };
+        self.unbind_detached(&sel);
         for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
             flip(e, mid, horizontal);
+            binding::mirror_fixed(e, horizontal);
         }
         self.commit(before);
     }
@@ -908,6 +993,8 @@ impl App {
             return;
         }
         let before = self.elements.clone();
+        let sel = self.selected.clone();
+        self.unbind_detached(&sel);
         for (_, ids) in units {
             let Some(b) = geom::scene_bounds(self.elements.iter().filter(|e| ids.contains(&e.id)))
             else {
@@ -1236,8 +1323,14 @@ impl App {
             } else {
                 el.set_points(pts);
                 el.touch();
+                let last = geom::abs_points(el).last().copied();
+                if let Some(last) = last {
+                    let mods = self.mods;
+                    self.bind_end_at(&id, true, last, mods);
+                }
             }
         }
+        self.bind_hint = None;
         self.commit(before);
         if !self.tool_locked {
             self.tool = Tool::Select;
@@ -1433,6 +1526,7 @@ impl App {
                 self.cam.scroll.y += scroll.y / self.cam.zoom;
             }
         }
+        self.mods = mods;
         let Some(pos) = pos else { return };
         let wp = self.cam.w(pos);
         self.pointer_world = wp;
@@ -1470,6 +1564,12 @@ impl App {
             && !matches!(self.drag, Drag::None | Drag::LinearMulti { .. })
         {
             self.on_release(wp);
+        }
+        // com a ferramenta de seta, destaca a forma onde a seta vai começar
+        if matches!(self.drag, Drag::None) {
+            self.bind_hint = (over && self.tool == Tool::Arrow && !mods.command && !space)
+                .then(|| binding::candidate(&self.elements, wp, self.cam.zoom, ""))
+                .flatten();
         }
 
         // cursor
@@ -1596,6 +1696,12 @@ impl App {
                 if el.is_linear() {
                     el.set_points(vec![[0.0, 0.0], [0.0, 0.0]]);
                 }
+                if kind == "arrow"
+                    && !mods.command
+                    && let Some(c) = binding::candidate(&self.elements, p, self.cam.zoom, "")
+                {
+                    binding::set(&mut el, false, Some(&Binding::new(&c.id, c.fixed)));
+                }
                 let id = el.id.clone();
                 self.elements.push(el);
                 self.selected = [id.clone()].into();
@@ -1674,10 +1780,16 @@ impl App {
                     if mods.shift {
                         q = snap_angle(origin, p);
                     }
+                    // a ligação pode ter movido o início; recomeça da origem
+                    el.x = origin.x as f64;
+                    el.y = origin.y as f64;
                     el.set_points(vec![
                         [0.0, 0.0],
                         [(q.x - origin.x) as f64, (q.y - origin.y) as f64],
                     ]);
+                    el.touch();
+                    self.bind_end_at(&id, true, q, mods);
+                    return;
                 } else {
                     let mut d = q - origin;
                     if mods.shift {
@@ -1714,6 +1826,10 @@ impl App {
                     pts[n - 1] = [q.x as f64 - el.x, q.y as f64 - el.y];
                     el.set_points(pts);
                     el.touch();
+                    let arrow = el.kind == "arrow";
+                    self.bind_hint = (arrow && !mods.command)
+                        .then(|| binding::candidate(&self.elements, q, zoom, &id))
+                        .flatten();
                 }
             }
             Drag::FreeDraw { id, .. } => {
@@ -1755,6 +1871,8 @@ impl App {
                     d.x = snap(*ox as f32 + d.x, true) - *ox as f32;
                     d.y = snap(*oy as f32 + d.y, true) - *oy as f32;
                 }
+                let moving: HashSet<String> = originals.iter().map(|o| o.0.clone()).collect();
+                self.unbind_detached(&moving);
                 for (id, ox, oy) in originals {
                     if let Some(el) = self.get_mut(&id) {
                         el.x = ox + d.x as f64;
@@ -1762,6 +1880,7 @@ impl App {
                         el.touch();
                     }
                 }
+                self.sync_bindings();
             }
             Drag::BoxSelect { start, cur, base } => {
                 *cur = p;
@@ -1790,10 +1909,21 @@ impl App {
             Drag::Resize { handle, orig, .. } => {
                 let (handle, orig) = (*handle, orig.clone());
                 let updated = resize(&orig, handle, p, mods.shift, g);
+                let n = orig.points().len();
+                let end_point = match handle {
+                    Handle::Point(i) if orig.kind == "arrow" && (i == 0 || i + 1 == n) => {
+                        geom::abs_points(&updated).get(i).map(|q| (i != 0, *q))
+                    }
+                    _ => None,
+                };
                 if let Some(el) = self.get_mut(&orig.id) {
                     *el = updated;
                     el.touch();
                 }
+                if let Some((end, q)) = end_point {
+                    self.bind_end_at(&orig.id, end, q, mods);
+                }
+                self.sync_bindings();
             }
             Drag::Rotate { orig, .. } => {
                 let c = geom::center(orig);
@@ -1808,6 +1938,7 @@ impl App {
                     el.angle = a as f64;
                     el.touch();
                 }
+                self.sync_bindings();
             }
             Drag::Erase { last, marked } => {
                 let a = *last;
@@ -1829,22 +1960,27 @@ impl App {
         }
     }
 
-    fn on_release(&mut self, _p: P) {
+    fn on_release(&mut self, p: P) {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
+        self.bind_hint = None;
         let tol = 3.0 / self.cam.zoom as f64;
         match drag {
-            Drag::Create { id, before, .. } => {
+            Drag::Create { id, before, origin } => {
                 let Some(el) = self.elements.iter().find(|e| e.id == id) else {
                     return;
                 };
+                // linhas: mede o arrasto do ponteiro (a ligação pode ter movido as pontas)
                 let tiny = if el.is_linear() {
-                    let pts = el.points();
-                    pts.len() < 2 || (pts[1][0]).hypot(pts[1][1]) < tol
+                    ((p - origin).len() as f64) < tol
                 } else {
                     el.width < tol && el.height < tol
                 };
                 if tiny && el.is_linear() {
-                    // modo clique a clique
+                    // modo clique a clique (a ponta final liga ao terminar)
+                    if let Some(el) = self.get_mut(&id) {
+                        binding::set(el, true, None);
+                        el.touch();
+                    }
                     self.drag = Drag::LinearMulti { id, before };
                     return;
                 }
@@ -2106,6 +2242,7 @@ impl App {
                 };
                 let before = self.elements.clone();
                 let sel = self.selected.clone();
+                self.unbind_detached(&sel);
                 for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
                     e.x += dx * step;
                     e.y += dy * step;
@@ -2211,6 +2348,7 @@ impl App {
             }
         }
         self.update_editing_text(&painter);
+        self.sync_bindings();
 
         let bg = crate::model::parse_color(&self.view_bg).unwrap_or([255, 255, 255, 255]);
         painter.rect_filled(rect, 0.0, render::c32(bg, self.dark, 1.0));
@@ -2368,6 +2506,7 @@ impl App {
                 }
             }
         }
+        self.paint_bind_hint(&painter);
         if let Drag::BoxSelect { start, cur, .. } = &self.drag {
             let r = egui::Rect::from_two_pos(self.cam.s(*start), self.cam.s(*cur));
             painter.rect(
@@ -2377,6 +2516,40 @@ impl App {
                 sel_stroke,
                 StrokeKind::Middle,
             );
+        }
+    }
+
+    /// Destaca a forma onde a seta vai ligar e os pontos de encaixe dela.
+    fn paint_bind_hint(&self, painter: &egui::Painter) {
+        let Some(hint) = &self.bind_hint else { return };
+        let Some(el) = self.elements.iter().find(|e| e.id == hint.id) else {
+            return;
+        };
+        let Some(outline) = geom::outline(el) else {
+            return;
+        };
+        let c = geom::center(el);
+        let a = el.angle as f32;
+        let pts: Vec<Pos2> = outline
+            .iter()
+            .map(|p| self.cam.s(rotate(*p, c, a)))
+            .collect();
+        painter.add(egui::Shape::closed_line(
+            pts,
+            Stroke::new(4.0, SELECTION.gamma_multiply(0.35)),
+        ));
+        let fill = if self.dark {
+            Color32::from_gray(30)
+        } else {
+            Color32::WHITE
+        };
+        for f in binding::ANCHORS {
+            let s = self.cam.s(binding::anchor_world(el, f));
+            if hint.fixed == Some(f) {
+                painter.circle_filled(s, 5.0, SELECTION);
+            } else {
+                painter.circle(s, 3.5, fill, Stroke::new(1.5, SELECTION));
+            }
         }
     }
 
@@ -2650,6 +2823,31 @@ mod tests {
         let r = resize(&e, Handle::Point(0), P::new(0.0, 0.0), false, false);
         assert_eq!((r.x, r.y), (0.0, 0.0));
         assert_eq!(r.points(), vec![[0.0, 0.0], [110.0, 10.0]]);
+    }
+
+    #[test]
+    fn copies_keep_bindings_only_inside_the_copy() {
+        let a = rect(0.0);
+        let b = rect(0.0);
+        let mut arrow = Element::new("arrow", 0.0, 0.0, &Style::default());
+        arrow.set_points(vec![[0.0, 0.0], [50.0, 0.0]]);
+        binding::set(&mut arrow, false, Some(&Binding::new(&a.id, None)));
+        binding::set(
+            &mut arrow,
+            true,
+            Some(&Binding::new(&b.id, Some([0.0, 0.5]))),
+        );
+        let copies = App::clone_with_new_ids(&[a.clone(), arrow], P::new(10.0, 10.0));
+        let start = binding::get(&copies[1], false).unwrap();
+        assert_eq!(
+            start.element_id, copies[0].id,
+            "ligação remapeada para a cópia"
+        );
+        assert_eq!(
+            binding::get(&copies[1], true),
+            None,
+            "forma não copiada: solta"
+        );
     }
 
     #[test]
