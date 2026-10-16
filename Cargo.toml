@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Editor de diagramas no estilo Excalidraw, nativo em Rust e 100% offline"
 repository = "https://github.com/diegofernandes/rustdraw"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [dependencies]
 dirs = "7.0.0"
