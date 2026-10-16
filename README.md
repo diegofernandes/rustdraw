@@ -22,7 +22,7 @@ Binários prontos para **Linux** (x86_64), **Windows** (x86_64) e **macOS** (uni
 
 > No macOS o binário não é assinado: na primeira vez, clique com o botão direito → Abrir, ou rode `xattr -d com.apple.quarantine rustdraw`.
 
-Para publicar uma nova versão: atualize `version` no `Cargo.toml`, faça o commit e crie a tag correspondente (`git tag v0.2.0 && git push origin v0.2.0`). O workflow `Release` compila as três plataformas e publica a release com os pacotes e o `SHA256SUMS.txt`.
+Para publicar uma nova versão, basta criar a tag (`git tag v0.2.0 && git push origin v0.2.0`, ou pela tela de Releases do GitHub). O workflow `Release` usa a versão da tag no build, compila as três plataformas e publica a release com os pacotes e o `SHA256SUMS.txt`. Não é preciso editar o `Cargo.toml` antes; ele pode ser atualizado depois, quando for conveniente.
 
 ## Compilar do código-fonte
 
