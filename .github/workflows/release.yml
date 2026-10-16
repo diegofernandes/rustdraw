@@ -1,6 +1,6 @@
 name: Release
 
-# Tag `vX.Y.Z` (igual à versão do Cargo.toml) → compila Linux, Windows e macOS
+# Tag `vX.Y.Z` (a versão do build vem da tag) → compila Linux, Windows e macOS
 # e publica uma release no GitHub com os pacotes e o SHA256SUMS.txt.
 # Rodar manualmente (workflow_dispatch) só gera os pacotes como artefatos.
 
@@ -52,14 +52,19 @@ jobs:
         id: version
         shell: bash
         run: |
-          crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            if [[ "${GITHUB_REF_NAME#v}" != "$crate_version" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME não bate com a versão do Cargo.toml ($crate_version)"
+            # A tag é a fonte da versão: grava ela no Cargo.toml/Cargo.lock só
+            # para este build, assim não é preciso editar o Cargo.toml antes.
+            version="${GITHUB_REF_NAME#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME não é uma versão válida (use vX.Y.Z)"
               exit 1
             fi
-            version="$crate_version"
+            perl -0pi -e 's/^version = ".*?"/version = "'"$version"'"/m' Cargo.toml
+            perl -0pi -e 's/(name = "rustdraw"\r?\nversion = )".*?"/$1"'"$version"'"/' Cargo.lock
+            git diff --stat
           else
+            crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
             version="$crate_version-dev.${GITHUB_SHA::7}"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
