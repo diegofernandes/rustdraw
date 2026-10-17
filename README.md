@@ -46,6 +46,37 @@ rustdraw export entrada.excalidraw saida.png --scale 2
 rustdraw export entrada.excalidraw saida.svg --dark --no-bg
 ```
 
+## Servidor MCP (para assistentes de IA)
+
+`rustdraw mcp` é um servidor [MCP](https://modelcontextprotocol.io) local: um assistente como o Claude Desktop ou o Claude Code consegue ler, desenhar, editar e exportar arquivos `.excalidraw` pelo RustDraw. Ele conversa só pelo stdin/stdout do processo que o cliente inicia, sem abrir porta nem usar a rede.
+
+```bash
+claude mcp add rustdraw -- /caminho/para/rustdraw mcp            # Claude Code
+claude mcp add rustdraw -- /caminho/para/rustdraw mcp ~/d.excalidraw   # com arquivo padrão
+```
+
+No Claude Desktop, em `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "rustdraw": { "command": "/caminho/para/rustdraw", "args": ["mcp"] }
+  }
+}
+```
+
+| Ferramenta | O que faz |
+|---|---|
+| `new_scene` | Cria um desenho vazio |
+| `get_scene` | Lista os elementos (id, tipo, posição, tamanho, texto, estilo, ligações) |
+| `add_elements` | Adiciona formas, textos, linhas e setas em lote; setas ligam em formas pelo id (`start`/`end`) e formas aceitam um rótulo (`label`) |
+| `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
+| `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
+| `export_image` | Grava PNG ou SVG |
+| `preview` | Devolve um PNG do desenho para o assistente conferir o resultado |
+
+Cada ferramenta recebe o caminho do arquivo em `file` (opcional se um arquivo padrão foi passado na linha de comando), lê, aplica a mudança e grava. Um lote com erro não grava nada. Se o mesmo arquivo estiver aberto no editor, reabra-o para ver as mudanças.
+
 ## Atalhos
 
 | Ferramenta | Tecla | | Ação | Atalho |
@@ -82,11 +113,13 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, histórico, arquivos |
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |
 | `src/fonts.rs` | Fontes embutidas |
+| `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
+| `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |
 
 As três saídas (tela, PNG e SVG) usam as mesmas primitivas geradas em `geom.rs`, então o que se vê é o que se exporta.
 
 ```bash
-cargo test   # modelo/round-trip, geometria, rough, exportação, redimensionamento, ligação de setas
+cargo test   # modelo/round-trip, geometria, rough, exportação, redimensionamento, ligação de setas, edição por comandos, MCP
 ```
 
 ## Limitações atuais
