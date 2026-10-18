@@ -7,6 +7,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 ## Recursos
 
 - **Formas**: retângulo, losango, elipse, seta, linha, desenho livre e texto
+- **Imagens**: cole um print com `Ctrl+V`, arraste PNG/JPG/GIF/WebP para a janela ou use `9` para escolher o arquivo. A imagem fica embutida no `.excalidraw` (campo `files`, igual ao Excalidraw), pode ser movida, redimensionada (mantém a proporção; `Shift` libera), girada e invertida, e sai no PNG e no SVG exportados
 - **Visual "desenhado à mão"**: traços irregulares com os mesmos algoritmos do rough.js (o motor do Excalidraw), determinísticos por `seed`
 - **Estilos**: cor de traço e fundo, preenchimento (hachura, hachura cruzada, sólido), espessura, tracejado/pontilhado, "desleixo" (arquiteto/artista/cartunista), bordas arredondadas, opacidade, pontas de seta (seta, triângulo, barra, ponto), fonte (à mão/normal/código), tamanho e alinhamento
 - **Edição**: seleção por clique ou caixa, mover, redimensionar (inclusive girado), girar (Shift = passos de 15°), editar pontos de linhas, linhas ponto a ponto, duplicar (Ctrl+D ou Alt+arrastar), agrupar, camadas, borracha, desfazer/refazer
@@ -73,11 +74,13 @@ No Claude Desktop, em `claude_desktop_config.json`:
 |---|---|
 | `new_scene` | Cria um desenho vazio |
 | `get_scene` | Lista os elementos (id, tipo, posição, tamanho, texto, estilo, ligações) |
-| `add_elements` | Adiciona formas, textos, linhas e setas em lote; setas ligam em formas pelo id (`start`/`end`) e formas aceitam um rótulo (`label`) |
+| `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`) e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
 | `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
 | `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
 | `export_image` | Grava PNG ou SVG (do desenho todo ou de um frame, em `frame`) |
 | `preview` | Devolve um PNG do desenho (ou de um frame) para o assistente conferir o resultado |
+
+Com o arquivo aberto no editor, as mudanças feitas pelo MCP (ou por qualquer outro programa) aparecem sozinhas. Se o desenho aberto tiver alterações não salvas, o editor pergunta se deve recarregar ou manter o seu; Ctrl+Z desfaz a recarga.
 
 Cada ferramenta recebe o caminho do arquivo em `file` (opcional se um arquivo padrão foi passado na linha de comando), lê, aplica a mudança e grava. Um lote com erro não grava nada. Se o mesmo arquivo estiver aberto no editor, reabra-o para ver as mudanças.
 
@@ -95,6 +98,7 @@ Cada ferramenta recebe o caminho do arquivo em `file` (opcional se um arquivo pa
 | Desenho livre | `P` / `7` | | Exportar imagem | `Ctrl+Shift+E` |
 | Texto | `T` / `8` / duplo clique | | Grade / Tema escuro | `Ctrl+'` / `Alt+Shift+D` |
 | Borracha | `E` / `0` | | Todos os atalhos | `?` ou `F1` |
+| Inserir imagem | `9` / `Ctrl+V` / arrastar | | | |
 | Manter ferramenta | `Q` | | Alinhar | `Ctrl+Shift+setas` |
 | Trocar tipo da forma | `Tab` / `Shift+Tab` | | Inverter | `Shift+H` / `Shift+V` |
 | Cor do traço / fundo | `S` / `G` | | Copiar / colar estilos | `Ctrl+Alt+C` / `Ctrl+Alt+V` |
@@ -121,6 +125,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
 | `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |
+| `src/watch.rs` | Percebe quando outro programa altera o arquivo aberto |
 
 As três saídas (tela, PNG e SVG) usam as mesmas primitivas geradas em `geom.rs`, então o que se vê é o que se exporta.
 
@@ -130,7 +135,7 @@ cargo test   # modelo/round-trip, geometria, rough, exportação, redimensioname
 
 ## Limitações atuais
 
-Ainda não há: imagens e texto dentro de contêiner. Elementos desses tipos vindos do Excalidraw são preservados ao salvar e aparecem como uma moldura tracejada.
+Ainda não há texto dentro de contêiner. Elementos desse tipo vindos do Excalidraw são preservados ao salvar e aparecem como uma moldura tracejada.
 
 ## Créditos
 

@@ -2,8 +2,9 @@
 
 use crate::fonts::{self, Family};
 use crate::frame;
-use crate::geom::{P, Prim, Rect, Rgba, element_prims, local_box, scene_bounds};
+use crate::geom::{P, Prim, Rect, Rgba, element_prims, image_placeholder, local_box, scene_bounds};
 use crate::model::{Element, dark_filter, parse_color};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use tiny_skia::{
@@ -20,6 +21,8 @@ pub struct ExportOpts {
     pub view_background: String,
     /// Exporta só o conteúdo deste frame (id), recortado pela área dele.
     pub frame: Option<String>,
+    /// Mapa `files` da cena (as imagens).
+    pub files: Map<String, Value>,
 }
 
 impl Default for ExportOpts {
@@ -31,6 +34,7 @@ impl Default for ExportOpts {
             padding: 10.0,
             view_background: "#ffffff".into(),
             frame: None,
+            files: Map::new(),
         }
     }
 }
@@ -184,6 +188,7 @@ pub fn render_pixmap(els: &[Element], opts: &ExportOpts) -> Result<Pixmap, Strin
     }
     let base = Transform::from_scale(s, s).pre_translate(pad - b.min.x, pad - b.min.y);
     let mut masks: HashMap<&str, Mask> = HashMap::new();
+    let mut images = HashMap::new();
     for item in &plan.items {
         let mask = match item.clip {
             Some(f) => {
@@ -202,10 +207,82 @@ pub fn render_pixmap(els: &[Element], opts: &ExportOpts) -> Result<Pixmap, Strin
             None => None,
         };
         for prim in &item.prims {
+            if let Prim::Image { file_id, .. } = prim {
+                let img = images
+                    .entry(file_id.clone())
+                    .or_insert_with(|| image_pixmap(&opts.files, file_id));
+                if let Some(img) = img {
+                    draw_image(&mut pm, prim, img, base, mask);
+                    continue;
+                }
+                for p in image_placeholder(prim) {
+                    draw_prim(&mut pm, &p, base, s, opts.dark, mask);
+                }
+                continue;
+            }
             draw_prim(&mut pm, prim, base, s, opts.dark, mask);
         }
     }
     Ok(pm)
+}
+
+/// Decodifica uma imagem de `files` para RGBA pré-multiplicado.
+fn image_pixmap(files: &Map<String, Value>, id: &str) -> Option<Pixmap> {
+    let img = crate::files::decode(files, id)?;
+    let size = tiny_skia::IntSize::from_wh(img.width(), img.height())?;
+    let mut data = img.into_raw();
+    for px in data.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        for c in &mut px[..3] {
+            *c = (*c as u32 * a / 255) as u8;
+        }
+    }
+    Pixmap::from_vec(data, size)
+}
+
+fn draw_image(pm: &mut Pixmap, prim: &Prim, img: &Pixmap, base: Transform, mask: Option<&Mask>) {
+    let Prim::Image {
+        min,
+        max,
+        uv,
+        angle,
+        center,
+        opacity,
+        ..
+    } = prim
+    else {
+        return;
+    };
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    // recorte em pixels da imagem; u0 > u1 quando está espelhada
+    let (u0, v0, u1, v1) = (uv[0] * iw, uv[1] * ih, uv[2] * iw, uv[3] * ih);
+    if (u1 - u0).abs() < 0.5 || (v1 - v0).abs() < 0.5 {
+        return;
+    }
+    let (sx, sy) = ((max.x - min.x) / (u1 - u0), (max.y - min.y) / (v1 - v0));
+    // o padrão é posicionado nas coordenadas do retângulo (antes de `rt`)
+    let t = Transform::from_translate(min.x, min.y)
+        .pre_scale(sx, sy)
+        .pre_translate(-u0, -v0);
+    let pattern = tiny_skia::Pattern::new(
+        img.as_ref(),
+        tiny_skia::SpreadMode::Pad,
+        tiny_skia::FilterQuality::Bilinear,
+        *opacity,
+        t,
+    );
+    let paint = Paint {
+        shader: pattern,
+        anti_alias: true,
+        ..Default::default()
+    };
+    let rect = tiny_skia::Rect::from_ltrb(min.x, min.y, max.x, max.y);
+    let Some(rect) = rect else { return };
+    let rt = base
+        .pre_translate(center.x, center.y)
+        .pre_rotate(angle.to_degrees())
+        .pre_translate(-center.x, -center.y);
+    pm.fill_rect(rect, &paint, rt, mask);
 }
 
 fn paint_for(c: Rgba) -> Paint<'static> {
@@ -273,6 +350,8 @@ fn draw_prim(
                 mask,
             );
         }
+        // desenhadas por `draw_image` em `render_pixmap`
+        Prim::Image { .. } => {}
         Prim::Text {
             origin,
             width,
@@ -444,8 +523,62 @@ pub fn render_svg(els: &[Element], opts: &ExportOpts) -> Result<String, String> 
             None => String::new(),
         };
         let _ = writeln!(out, "    <g data-id=\"{}\"{clip}>", esc(item.id));
-        for prim in item.prims.iter().cloned() {
+        let image_url = |id: &str| {
+            opts.files
+                .get(id)
+                .and_then(|f| f.get("dataURL"))
+                .and_then(|u| u.as_str())
+                .filter(|u| u.starts_with("data:image/"))
+        };
+        let prims: Vec<Prim> = item
+            .prims
+            .iter()
+            .cloned()
+            .flat_map(|p| match &p {
+                Prim::Image { file_id, .. } if image_url(file_id).is_none() => {
+                    image_placeholder(&p)
+                }
+                _ => vec![p],
+            })
+            .collect();
+        for prim in prims {
             match prim {
+                Prim::Image {
+                    file_id,
+                    min,
+                    max,
+                    uv,
+                    angle,
+                    center,
+                    opacity,
+                } => {
+                    let url = image_url(&file_id).unwrap_or_default();
+                    let fx = if uv[0] > uv[2] { -1 } else { 1 };
+                    let fy = if uv[1] > uv[3] { -1 } else { 1 };
+                    let _ = writeln!(
+                        out,
+                        r#"      <g transform="rotate({:.3} {cx:.2} {cy:.2}) translate({cx:.2} {cy:.2}) scale({fx} {fy}) translate({:.2} {:.2})" opacity="{opacity:.3}">"#,
+                        angle.to_degrees(),
+                        -center.x,
+                        -center.y,
+                        cx = center.x,
+                        cy = center.y,
+                    );
+                    let _ = writeln!(
+                        out,
+                        r#"        <svg x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" viewBox="{:.5} {:.5} {:.5} {:.5}" preserveAspectRatio="none"><image href="{}" x="0" y="0" width="1" height="1" preserveAspectRatio="none"/></svg>"#,
+                        min.x,
+                        min.y,
+                        max.x - min.x,
+                        max.y - min.y,
+                        uv[0].min(uv[2]),
+                        uv[1].min(uv[3]),
+                        (uv[2] - uv[0]).abs(),
+                        (uv[3] - uv[1]).abs(),
+                        esc(url)
+                    );
+                    let _ = writeln!(out, "      </g>");
+                }
                 Prim::Stroke {
                     pts,
                     color,
@@ -602,5 +735,33 @@ mod tests {
         assert_eq!(&png[1..4], b"PNG");
         let svg = render_svg(&els, &ExportOpts::default()).unwrap();
         assert!(svg.contains("<path") && svg.contains("Olá") && svg.contains("@font-face"));
+    }
+
+    #[test]
+    fn images_are_drawn() {
+        let mut opts = ExportOpts {
+            scale: 1.0,
+            padding: 0.0,
+            background: false,
+            ..Default::default()
+        };
+        let red = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let a = crate::files::add_bytes(&mut opts.files, &crate::files::encode_png(&red).unwrap())
+            .unwrap();
+        let mut el = crate::files::image_element(&a, 10.0, 10.0, 20.0);
+        el.width = 20.0;
+        el.height = 20.0;
+        el.x = 0.0;
+        el.y = 0.0;
+        let pm = render_pixmap(std::slice::from_ref(&el), &opts).unwrap();
+        let px = pm.pixel(10, 10).unwrap();
+        assert_eq!((px.red(), px.green(), px.alpha()), (255, 0, 255));
+        let svg = render_svg(std::slice::from_ref(&el), &opts).unwrap();
+        assert!(svg.contains("<image href=\"data:image/png;base64,"));
+        // sem o arquivo: um quadro cinza no lugar
+        opts.files.clear();
+        let pm = render_pixmap(&[el], &opts).unwrap();
+        let px = pm.pixel(10, 10).unwrap();
+        assert_eq!((px.red(), px.green()), (233, 236));
     }
 }

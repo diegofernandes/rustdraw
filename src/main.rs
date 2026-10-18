@@ -11,6 +11,7 @@ mod app;
 mod binding;
 mod edit;
 mod export;
+mod files;
 mod fonts;
 mod frame;
 mod geom;
@@ -19,6 +20,7 @@ mod model;
 mod render;
 mod rough;
 mod ui;
+mod watch;
 
 use std::path::PathBuf;
 
@@ -95,6 +97,7 @@ fn cli_export(args: &[String]) -> Result<(), String> {
             frame::find(&scene.elements, &name).ok_or(format!("frame não encontrado: {name}"))?,
         );
     }
+    opts.files = scene.files_map();
     if output.to_lowercase().ends_with(".svg") {
         std::fs::write(output, export::render_svg(&scene.elements, &opts)?)
             .map_err(|e| e.to_string())?;

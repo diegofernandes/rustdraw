@@ -90,7 +90,7 @@ pub fn set(el: &mut Element, end: bool, b: Option<&Binding>) {
 /// Formas em que uma seta pode ser ligada.
 pub fn is_bindable(el: &Element) -> bool {
     match el.kind.as_str() {
-        "rectangle" | "diamond" | "ellipse" => true,
+        "rectangle" | "diamond" | "ellipse" | "image" => true,
         "text" => el.extra.get("containerId").is_none_or(|v| v.is_null()),
         _ => false,
     }

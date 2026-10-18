@@ -25,6 +25,7 @@ enum Icon {
     Line,
     Draw,
     Text,
+    Image,
     Eraser,
     Frame,
     Lock(bool),
@@ -150,6 +151,20 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, col: Color32) {
                 FontId::proportional(r.height() * 1.1),
                 col,
             );
+        }
+        Icon::Image => {
+            p.rect_stroke(r.shrink(1.5), 2.0, s, StrokeKind::Middle);
+            p.add(Shape::line(
+                pts(&[
+                    (0.1, 0.85),
+                    (0.4, 0.5),
+                    (0.6, 0.7),
+                    (0.72, 0.58),
+                    (0.9, 0.78),
+                ]),
+                s,
+            ));
+            p.circle_stroke(rel(r, 0.68, 0.3), r.width() * 0.09, s);
         }
         Icon::Eraser => {
             p.add(Shape::closed_line(
@@ -412,6 +427,8 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
     }
     let has = |ks: &[&str]| kinds.iter().any(|k| ks.contains(&k.as_str()));
     let only_text = kinds.iter().all(|k| k == "text");
+    // imagens só têm opacidade e camadas, como no Excalidraw
+    let only_image = kinds.iter().all(|k| k == "image");
     let has_selection = !sel_kinds.is_empty();
 
     egui::Area::new(Id::unique("props"))
@@ -421,8 +438,10 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
             panel_frame(ui).show(ui, |ui| {
                 ui.set_width(196.0);
                 ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
-                section(ui, "Traço");
-                color_row(ui, app, false);
+                if !only_image {
+                    section(ui, "Traço");
+                    color_row(ui, app, false);
+                }
                 if has(&["rectangle", "diamond", "ellipse", "line", "freedraw"]) {
                     section(ui, "Fundo");
                     color_row(ui, app, true);
@@ -483,7 +502,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                         });
                     }
                 }
-                if !only_text {
+                if !only_text && !only_image {
                     section(ui, "Espessura do traço");
                     let cur =
                         current_value(app, |e| e.stroke_width).unwrap_or(app.style.stroke_width);
@@ -885,11 +904,15 @@ fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
                         (Tool::Line, Icon::Line, "Linha (L ou 6)", "6"),
                         (Tool::Draw, Icon::Draw, "Desenho livre (P ou 7)", "7"),
                         (Tool::Text, Icon::Text, "Texto (T ou 8)", "8"),
+                        // imagem não é um modo: abre o seletor de arquivo
+                        (Tool::Select, Icon::Image, "Inserir imagem (9)", "9"),
                         (Tool::Eraser, Icon::Eraser, "Borracha (E ou 0)", "0"),
                         (Tool::Frame, Icon::Frame, "Frame (F)", "F"),
                     ];
                     for (tool, icon, tip, key) in tools {
-                        let resp = icon_button(ui, app.tool == tool, 34.0, tip, |p, r, c| {
+                        let is_image = icon == Icon::Image;
+                        let on = app.tool == tool && !is_image;
+                        let resp = icon_button(ui, on, 34.0, tip, |p, r, c| {
                             paint_icon(p, r.shrink(10.0), icon, c);
                             if !key.is_empty() {
                                 p.text(
@@ -901,7 +924,9 @@ fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
                                 );
                             }
                         });
-                        if resp.clicked() {
+                        if resp.clicked() && is_image {
+                            app.image_dialog();
+                        } else if resp.clicked() {
                             app.set_tool(tool);
                         }
                     }
@@ -1595,6 +1620,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Linha", "L ou 6"),
                     ("Desenho livre", "P ou 7"),
                     ("Texto", "T ou 8"),
+                    ("Inserir imagem", "9"),
                     ("Borracha", "E ou 0"),
                     ("Frame", "F"),
                     ("Editar texto", "Enter"),
@@ -1682,6 +1708,34 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
                         app.clear_canvas();
                     }
                     if ui.button("Cancelar").clicked() {
+                        app.confirm = None;
+                    }
+                });
+            });
+        return;
+    }
+    if pending == Pending::Reload {
+        let name = app
+            .file_path
+            .as_deref()
+            .map(crate::app::file_name)
+            .unwrap_or_default();
+        egui::Window::new("Arquivo alterado")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Outro programa alterou {name}, mas o desenho aberto tem alterações não salvas."
+                ));
+                ui.label("Recarregar troca o desenho pelo do arquivo (Ctrl+Z volta ao seu).");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Recarregar").clicked() {
+                        app.confirm = None;
+                        app.reload_from_disk(None);
+                    }
+                    if ui.button("Manter o meu").clicked() {
                         app.confirm = None;
                     }
                 });

@@ -2,17 +2,22 @@
 
 use crate::binding::{self, Binding, Candidate};
 use crate::export::{self, ExportOpts};
+use crate::files;
 use crate::frame;
 use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
 use crate::render::{self, Cam, PaintCtx};
+use crate::watch::Watch;
 use egui::{Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Sense, Stroke, StrokeKind};
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub const SELECTION: Color32 = Color32::from_rgb(0x69, 0x65, 0xdb);
 const HANDLE_PX: f32 = 7.0;
 const GRID: f32 = 20.0;
+/// De quanto em quanto tempo o arquivo aberto é consultado no disco.
+const WATCH_INTERVAL_MS: u64 = 700;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -126,6 +131,8 @@ pub enum Pending {
     Open,
     /// Limpar o canvas (Ctrl+Delete).
     Clear,
+    /// O arquivo aberto mudou no disco e há alterações não salvas.
+    Reload,
 }
 
 struct Cached {
@@ -147,6 +154,15 @@ pub struct ContextMenu {
 
 pub struct App {
     pub elements: Vec<Element>,
+    /// Mapa `files` do `.excalidraw` (imagens). Guarda também imagens já
+    /// apagadas, para o desfazer; só as usadas vão para o arquivo.
+    pub files: Map<String, Value>,
+    /// Texturas das imagens, por `fileId`.
+    textures: HashMap<String, egui::TextureHandle>,
+    /// Imagens que não decodificaram (não tenta de novo a cada quadro).
+    bad_images: HashSet<String>,
+    /// Área do canvas na tela, do último quadro.
+    view: egui::Rect,
     pub selected: HashSet<String>,
     pub tool: Tool,
     pub tool_locked: bool,
@@ -161,6 +177,9 @@ pub struct App {
     pub editing: Option<TextEditing>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
+    /// Acompanha o arquivo aberto, para recarregar quando outro programa o altera.
+    watch: Option<Watch>,
+    last_watch: f64,
     pub dark: bool,
     pub grid: bool,
     pub view_bg: String,
@@ -219,6 +238,8 @@ enum DialogKind {
         opts: ExportOpts,
         base: String,
     },
+    /// Inserir imagem (ferramenta de imagem, tecla 9).
+    Image,
 }
 
 /// `Err(())` = o sistema não tem diálogo de arquivos (ver [`NO_DIALOG`]).
@@ -303,6 +324,10 @@ impl App {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut app = App {
             elements: vec![],
+            files: Map::new(),
+            textures: HashMap::new(),
+            bad_images: HashSet::new(),
+            view: egui::Rect::NOTHING,
             selected: HashSet::new(),
             tool: Tool::Select,
             tool_locked: false,
@@ -320,6 +345,8 @@ impl App {
             editing: None,
             file_path: None,
             dirty: false,
+            watch: None,
+            last_watch: 0.0,
             dark: false,
             grid: false,
             view_bg: "#ffffff".into(),
@@ -373,6 +400,16 @@ impl App {
                 .get("rustdrawDirty")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // sem alterações locais, o que estiver no disco vale (recarrega no
+            // primeiro quadro se mudou com o editor fechado)
+            app.watch = app.file_path.as_deref().map(|fp| {
+                let known = if app.dirty {
+                    std::fs::read(fp).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                Watch::new(fp, &known)
+            });
             app.dark = f
                 .app_state
                 .get("theme")
@@ -512,12 +549,17 @@ impl App {
     }
 
     pub fn scene_file(&self) -> SceneFile {
-        SceneFile::new(self.elements.clone(), &self.view_bg, self.grid)
+        let mut f = SceneFile::new(self.elements.clone(), &self.view_bg, self.grid);
+        f.set_files(&self.files);
+        f
     }
 
     fn apply_scene(&mut self, f: SceneFile) {
         self.view_bg = f.view_background().unwrap_or_else(|| "#ffffff".into());
         self.grid = f.grid_enabled();
+        self.files = f.files_map();
+        self.textures.clear();
+        self.bad_images.clear();
         self.elements = f.elements;
         self.bind_seen.clear();
         self.bind_hint = None;
@@ -541,10 +583,11 @@ impl App {
     pub fn load_path(&mut self, p: &std::path::Path) {
         match std::fs::read_to_string(p)
             .map_err(|e| e.to_string())
-            .and_then(|t| SceneFile::parse(&t))
+            .and_then(|t| SceneFile::parse(&t).map(|f| (f, t)))
         {
-            Ok(f) => {
+            Ok((f, t)) => {
                 self.apply_scene(f);
+                self.watch = Some(Watch::new(p, t.as_bytes()));
                 self.file_path = Some(p.to_path_buf());
                 self.dirty = false;
                 self.autosave_pending = true;
@@ -611,6 +654,13 @@ impl App {
                     None => {}
                 }
             }
+            DialogKind::Image => match r {
+                Ok(Some(p)) => self.insert_image_file(&p, None),
+                Ok(None) => {}
+                Err(()) => self.toast(format!(
+                    "{NO_DIALOG}. Dica: arraste a imagem para a janela ou cole com Ctrl+V."
+                )),
+            },
             DialogKind::Export {
                 svg,
                 els,
@@ -642,7 +692,80 @@ impl App {
             Pending::New => self.new_scene(),
             Pending::Open => self.open_dialog(),
             Pending::Clear => self.clear_canvas(),
+            Pending::Reload => self.reload_from_disk(None),
         }
+    }
+
+    /// Consulta o arquivo aberto e recarrega se outro programa o alterou.
+    ///
+    /// Espera o fim de qualquer interação (arrasto, texto, diálogo) para não
+    /// trocar a cena no meio dela.
+    fn poll_watch(&mut self, ctx: &egui::Context) {
+        if self.watch.is_none() {
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(WATCH_INTERVAL_MS));
+        let busy = !matches!(self.drag, Drag::None)
+            || self.editing.is_some()
+            || self.confirm.is_some()
+            || self.dialog.is_some();
+        if busy || self.now - self.last_watch < WATCH_INTERVAL_MS as f64 / 1000.0 {
+            return;
+        }
+        self.last_watch = self.now;
+        let Some(text) = self.watch.as_mut().and_then(|w| w.poll()) else {
+            return;
+        };
+        if self.dirty {
+            // "Manter o meu" deixa como está; salvar depois sobrescreve
+            self.confirm = Some(Pending::Reload);
+        } else {
+            self.reload_from_disk(Some(text));
+        }
+    }
+
+    /// Troca a cena pelo conteúdo do arquivo no disco (lido agora, se `text` for `None`).
+    ///
+    /// Diferente de abrir: mantém a câmera e a seleção, e entra no histórico,
+    /// então Ctrl+Z volta ao desenho de antes da recarga.
+    pub fn reload_from_disk(&mut self, text: Option<String>) {
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        let Some(text) = text.or_else(|| std::fs::read_to_string(&path).ok()) else {
+            self.toast(format!("Não foi possível ler {}", file_name(&path)));
+            return;
+        };
+        let f = match SceneFile::parse(&text) {
+            Ok(f) => f,
+            // pode ser uma gravação pela metade de um programa que não grava de uma vez
+            Err(_) => {
+                if let Some(w) = &mut self.watch {
+                    w.retry();
+                }
+                return;
+            }
+        };
+        self.watch = Some(Watch::new(&path, text.as_bytes()));
+        self.view_bg = f.view_background().unwrap_or_else(|| "#ffffff".into());
+        self.grid = f.grid_enabled();
+        if f.elements != self.elements {
+            let before = std::mem::replace(&mut self.elements, f.elements);
+            self.undo.push(before);
+            if self.undo.len() > 300 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+            let ids: HashSet<String> = self.elements.iter().map(|e| e.id.clone()).collect();
+            self.selected.retain(|s| ids.contains(s));
+            self.bind_seen.clear();
+            self.bind_hint = None;
+            self.export_preview = None;
+            self.toast(format!("Recarregado: {}", file_name(&path)));
+        }
+        self.dirty = false;
+        self.autosave_pending = true;
+        self.last_change = self.now;
     }
 
     pub fn new_scene(&mut self) {
@@ -653,6 +776,7 @@ impl App {
         let bg = self.view_bg.clone();
         self.apply_scene(SceneFile::new(vec![], &bg, self.grid));
         self.file_path = None;
+        self.watch = None;
         self.dirty = false;
         self.autosave_pending = true;
     }
@@ -695,8 +819,10 @@ impl App {
     }
 
     fn write_to(&mut self, p: &std::path::Path) {
-        match std::fs::write(p, self.scene_file().to_json()) {
+        let json = self.scene_file().to_json();
+        match std::fs::write(p, &json) {
             Ok(()) => {
+                self.watch = Some(Watch::new(p, json.as_bytes()));
                 self.file_path = Some(p.to_path_buf());
                 self.dirty = false;
                 self.autosave_pending = true;
@@ -735,6 +861,15 @@ impl App {
         }
     }
 
+    /// Opções de exportação com o fundo da cena e as imagens usadas por `els`.
+    pub fn export_opts_for(&self, els: &[Element]) -> ExportOpts {
+        let mut opts = self.export_opts.clone();
+        opts.view_background = self.view_bg.clone();
+        opts.files = files::subset(&self.files, els);
+        opts.frame = None;
+        opts
+    }
+
     /// O frame selecionado, quando a seleção é um frame só (com ou sem os filhos).
     pub fn selected_frame(&self) -> Option<&Element> {
         let mut frames = self
@@ -753,17 +888,17 @@ impl App {
     /// Elementos e opções da exportação: com "Somente a seleção" e um frame
     /// selecionado, exporta só o conteúdo dele, recortado pela área do frame.
     pub fn export_job(&self) -> (Vec<Element>, ExportOpts) {
-        let mut opts = self.export_opts.clone();
-        opts.view_background = self.view_bg.clone();
-        opts.frame = None;
-        if !self.export_selection_only || self.selected.is_empty() {
-            return (self.elements.clone(), opts);
+        let frame = self.selected_frame().map(|f| f.id.clone());
+        let els = if !self.export_selection_only || self.selected.is_empty() || frame.is_some() {
+            self.elements.clone()
+        } else {
+            self.selection_with_children()
+        };
+        let mut opts = self.export_opts_for(&els);
+        if self.export_selection_only && !self.selected.is_empty() {
+            opts.frame = frame;
         }
-        if let Some(f) = self.selected_frame() {
-            opts.frame = Some(f.id.clone());
-            return (self.elements.clone(), opts);
-        }
-        (self.selection_with_children(), opts)
+        (els, opts)
     }
 
     /// Seleção mais os filhos dos frames selecionados, na ordem do desenho.
@@ -778,14 +913,14 @@ impl App {
 
     /// Como `export_job`, para copiar a seleção (ou tudo) como imagem.
     fn copy_job(&self) -> (Vec<Element>, ExportOpts) {
-        let mut opts = self.export_opts.clone();
-        opts.view_background = self.view_bg.clone();
-        opts.frame = self.selected_frame().map(|f| f.id.clone());
-        let els = if self.selected.is_empty() || opts.frame.is_some() {
+        let frame = self.selected_frame().map(|f| f.id.clone());
+        let els = if self.selected.is_empty() || frame.is_some() {
             self.elements.clone()
         } else {
             self.selection_with_children()
         };
+        let mut opts = self.export_opts_for(&els);
+        opts.frame = frame;
         (els, opts)
     }
 
@@ -953,7 +1088,7 @@ impl App {
     pub fn copy_selection(&self, ctx: &egui::Context) {
         let sel = self.selection_with_children();
         if !sel.is_empty() {
-            ctx.copy_text(clipboard_json(&sel));
+            ctx.copy_text(clipboard_json(&sel, &self.files));
         }
     }
 
@@ -967,6 +1102,9 @@ impl App {
         if let Ok(f) = SceneFile::parse(text) {
             if f.elements.is_empty() {
                 return;
+            }
+            for (k, v) in f.files_map() {
+                self.files.entry(k).or_insert(v);
             }
             let b = geom::scene_bounds(f.elements.iter()).unwrap();
             let off = at - b.center();
@@ -1001,6 +1139,108 @@ impl App {
         }
         self.tool = Tool::Select;
         self.commit(before);
+    }
+
+    /// Ferramenta de imagem (tecla 9): escolhe um arquivo e insere no centro da tela.
+    pub fn image_dialog(&mut self) {
+        self.finish_editing();
+        self.finish_linear();
+        let fut = rfd::AsyncFileDialog::new()
+            .set_title("Inserir imagem")
+            .add_filter("Imagens", &["png", "jpg", "jpeg", "gif", "webp"])
+            .pick_file();
+        self.start_dialog(DialogKind::Image, fut);
+    }
+
+    pub fn insert_image_file(&mut self, p: &std::path::Path, at: Option<P>) {
+        match std::fs::read(p) {
+            Ok(bytes) => self.insert_image(&bytes, at),
+            Err(e) => self.toast(format!("Não foi possível abrir {}: {e}", file_name(p))),
+        }
+    }
+
+    /// Insere uma imagem (bytes PNG/JPG/GIF/WebP) com o centro em `at`
+    /// (padrão: o centro da tela), como o Excalidraw faz ao colar ou arrastar.
+    pub fn insert_image(&mut self, bytes: &[u8], at: Option<P>) {
+        if self.view_mode {
+            return;
+        }
+        let added = match files::add_bytes(&mut self.files, bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                self.toast(e);
+                return;
+            }
+        };
+        let view = if self.view.is_positive() {
+            self.view
+        } else {
+            egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))
+        };
+        let at = at.unwrap_or_else(|| self.cam.w(view.center()));
+        // como o Excalidraw: no máximo metade da altura da tela
+        let max_side = ((view.height() * 0.5).max(160.0) / self.cam.zoom) as f64;
+        let mut el = files::image_element(&added, at.x as f64, at.y as f64, max_side);
+        el.opacity = self.style.opacity;
+        el.frame_id = frame::frame_at(&self.elements, at, &HashSet::new())
+            .map(|i| self.elements[i].id.clone());
+        let before = self.elements.clone();
+        self.bad_images.remove(&added.id);
+        self.selected = [el.id.clone()].into();
+        self.elements.push(el);
+        self.tool = Tool::Select;
+        self.commit(before);
+    }
+
+    /// Imagem colada da área de transferência (print de tela, imagem copiada).
+    pub fn paste_image(&mut self, img: &egui::ColorImage) {
+        let [w, h] = img.size;
+        let raw: Vec<u8> = img
+            .pixels
+            .iter()
+            .flat_map(|c| c.to_srgba_unmultiplied())
+            .collect();
+        let png =
+            image::RgbaImage::from_raw(w as u32, h as u32, raw).and_then(|i| files::encode_png(&i));
+        let at = match self.paste_at.take() {
+            Some((p, t)) if self.now - t < 2.0 => p,
+            _ => self.pointer_world,
+        };
+        match png {
+            Some(png) => self.insert_image(&png, Some(at)),
+            None => self.toast("Não foi possível colar a imagem"),
+        }
+    }
+
+    /// Carrega as texturas das imagens visíveis que ainda não estão na GPU.
+    fn load_textures(&mut self, ctx: &egui::Context) {
+        let missing: Vec<String> = files::used_ids(&self.elements)
+            .into_iter()
+            .filter(|id| !self.textures.contains_key(*id) && !self.bad_images.contains(*id))
+            .map(String::from)
+            .collect();
+        for id in missing {
+            let Some(img) = files::decode(&self.files, &id) else {
+                self.bad_images.insert(id);
+                continue;
+            };
+            // limite de textura das GPUs mais modestas
+            const MAX_TEX: u32 = 4096;
+            let img = if img.width().max(img.height()) > MAX_TEX {
+                image::imageops::resize(
+                    &img,
+                    (img.width() * MAX_TEX / img.width().max(img.height())).max(1),
+                    (img.height() * MAX_TEX / img.width().max(img.height())).max(1),
+                    image::imageops::FilterType::Triangle,
+                )
+            } else {
+                img
+            };
+            let size = [img.width() as usize, img.height() as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+            let tex = ctx.load_texture(format!("img-{id}"), color, egui::TextureOptions::LINEAR);
+            self.textures.insert(id, tex);
+        }
     }
 
     pub fn reorder(&mut self, to_front: bool, all_the_way: bool) {
@@ -1366,6 +1606,11 @@ impl App {
             .iter_mut()
             .filter(|e| sel.contains(&e.id) && !frame::is_frame(e))
         {
+            if e.kind == "image" {
+                e.opacity = src.opacity;
+                e.touch();
+                continue;
+            }
             e.stroke_color = src.stroke_color.clone();
             if e.kind != "text" && !(e.kind == "arrow" && src.kind != "arrow") {
                 e.background_color = src.background_color.clone();
@@ -2444,6 +2689,7 @@ impl App {
                 egui::Event::Copy => self.copy_selection(ctx),
                 egui::Event::Cut => self.cut_selection(ctx),
                 egui::Event::Paste(t) => self.paste(t),
+                egui::Event::PasteImage(img) => self.paste_image(img),
                 _ => {}
             }
         }
@@ -2722,6 +2968,10 @@ impl App {
                 }
             }
         }
+        // 9: ferramenta de imagem (abre o seletor de arquivo, como no Excalidraw)
+        if k(n, Key::Num9) {
+            self.image_dialog();
+        }
         if k(n, Key::Q) {
             self.tool_locked = !self.tool_locked;
         }
@@ -2735,6 +2985,7 @@ impl App {
         let rect = ui.max_rect();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         self.cam.origin = rect.min;
+        self.view = rect;
         if self.pending_fit {
             self.pending_fit = false;
             self.zoom_to_fit(rect);
@@ -2744,6 +2995,7 @@ impl App {
 
     pub fn paint_canvas(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let painter = ui.painter_at(rect);
+        self.load_textures(ui.ctx());
 
         // mede textos colados
         if !self.needs_measure.is_empty() {
@@ -2866,6 +3118,7 @@ impl App {
                 dark: self.dark,
                 alpha: if marked.contains(&el.id) { 0.25 } else { 1.0 },
                 hand_ok: self.hand_ok,
+                images: &self.textures,
             };
             render::paint_prims(&pc, &entry.prims);
         }
@@ -3040,6 +3293,7 @@ impl App {
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.now = ctx.input(|i| i.time);
         self.poll_dialog();
+        self.poll_watch(ctx);
         let prefs = (self.dark, self.grid, self.view_bg.clone());
         if self.last_prefs.as_ref() != Some(&prefs) {
             if self.last_prefs.is_some() {
@@ -3068,9 +3322,22 @@ impl App {
             self.last_title = title;
         }
         // arquivos arrastados para a janela
+        // (imagens entram no desenho onde foram soltas; o resto é aberto)
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(p) = dropped.iter().map(|f| f.path().to_path_buf()).next() {
-            self.load_path(&p);
+        let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| self.cam.w(p));
+        let mut offset = 0.0;
+        for f in &dropped {
+            let at = at.map(|p| p + P::new(offset, offset));
+            let p = f.path().to_path_buf();
+            if !files::is_image_path(&p) {
+                self.load_path(&p);
+                return;
+            }
+            match f.bytes() {
+                Ok(bytes) => self.insert_image(&bytes, at),
+                Err(e) => self.toast(format!("Não foi possível abrir {}: {e}", file_name(&p))),
+            }
+            offset += 20.0;
         }
     }
 }
@@ -3099,6 +3366,15 @@ fn flip(e: &mut Element, mid: f64, horizontal: bool) {
         e.x = mid - e.x - e.width;
     } else {
         e.y = mid - e.y - e.height;
+    }
+    if e.kind == "image" {
+        let mut scale = e
+            .extra
+            .get("scale")
+            .and_then(|v| serde_json::from_value::<[f64; 2]>(v.clone()).ok())
+            .unwrap_or([1.0, 1.0]);
+        scale[if horizontal { 0 } else { 1 }] *= -1.0;
+        e.set_field("scale", serde_json::json!(scale));
     }
     if e.angle != 0.0 {
         e.angle = std::f64::consts::TAU - e.angle;
@@ -3147,7 +3423,12 @@ pub fn resize(orig: &Element, h: Handle, p: P, keep_ratio: bool, grid: bool) -> 
     }
     let (mut x0, mut y0, mut x1, mut y1) = (b.min.x, b.min.y, b.max.x, b.max.y);
     let text = orig.kind == "text";
-    let keep_ratio = keep_ratio || text;
+    // imagens mantêm a proporção por padrão; Shift libera (como no Excalidraw)
+    let keep_ratio = if orig.kind == "image" {
+        !keep_ratio
+    } else {
+        keep_ratio || text
+    };
     match h {
         Handle::N => y0 = q.y,
         Handle::S => y1 = q.y,
