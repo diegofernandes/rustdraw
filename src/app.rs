@@ -3,6 +3,7 @@
 use crate::binding::{self, Binding, Candidate};
 use crate::export::{self, ExportOpts};
 use crate::geom::{self, P, Prim, Rect, rotate};
+use crate::library::{self, LibraryItem};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
 use crate::render::{self, Cam, PaintCtx};
 use egui::{Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Sense, Stroke, StrokeKind};
@@ -115,6 +116,8 @@ pub enum Pending {
     Open,
     /// Limpar o canvas (Ctrl+Delete).
     Clear,
+    /// Esvaziar a biblioteca (ou remover os itens marcados).
+    ClearLibrary,
 }
 
 struct Cached {
@@ -190,6 +193,15 @@ pub struct App {
     bind_seen: HashMap<String, Vec<i64>>,
     /// Modificadores do último quadro (Ctrl/Cmd desliga a ligação de setas).
     mods: Modifiers,
+    /// Biblioteca pessoal (itens mais recentes primeiro).
+    pub library: Vec<LibraryItem>,
+    pub show_library: bool,
+    /// Itens marcados no painel da biblioteca (Shift+clique).
+    pub library_selected: HashSet<String>,
+    /// Item sendo arrastado do painel para o canvas.
+    pub library_drag: Option<String>,
+    /// Miniaturas já calculadas: limites e primitivas de cada item.
+    pub library_thumbs: HashMap<String, (Rect, Vec<Prim>)>,
 }
 
 /// O que fazer com o caminho escolhido no diálogo de arquivos.
@@ -203,6 +215,8 @@ enum DialogKind {
         opts: ExportOpts,
         base: String,
     },
+    ImportLibrary,
+    ExportLibrary(Vec<LibraryItem>),
 }
 
 /// `Err(())` = o sistema não tem diálogo de arquivos (ver [`NO_DIALOG`]).
@@ -337,6 +351,14 @@ impl App {
             bind_hint: None,
             bind_seen: HashMap::new(),
             mods: Modifiers::NONE,
+            library: library::path()
+                .filter(|p| p.exists())
+                .and_then(|p| library::load(&p).ok())
+                .unwrap_or_default(),
+            show_library: false,
+            library_selected: HashSet::new(),
+            library_drag: None,
+            library_thumbs: HashMap::new(),
         };
         if let Some(p) = open {
             app.load_path(&p);
@@ -517,10 +539,14 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn load_path(&mut self, p: &std::path::Path) {
-        match std::fs::read_to_string(p)
-            .map_err(|e| e.to_string())
-            .and_then(|t| SceneFile::parse(&t))
+        let text = std::fs::read_to_string(p).map_err(|e| e.to_string());
+        if let Ok(t) = &text
+            && library::is_library(t)
         {
+            self.import_library_text(t);
+            return;
+        }
+        match text.and_then(|t| SceneFile::parse(&t)) {
             Ok(f) => {
                 self.apply_scene(f);
                 self.file_path = Some(p.to_path_buf());
@@ -539,7 +565,7 @@ impl App {
         }
         let fut = rfd::AsyncFileDialog::new()
             .set_title("Abrir desenho")
-            .add_filter("Excalidraw", &["excalidraw", "json"])
+            .add_filter("Excalidraw", &["excalidraw", "json", library::EXT])
             .pick_file();
         self.start_dialog(DialogKind::Open, fut);
     }
@@ -611,7 +637,147 @@ impl App {
                     Err(e) => self.toast(format!("Erro ao exportar: {e}")),
                 }
             }
+            DialogKind::ImportLibrary => match r {
+                Ok(Some(p)) => match std::fs::read_to_string(&p) {
+                    Ok(t) => self.import_library_text(&t),
+                    Err(e) => self.toast(format!("Não foi possível abrir: {e}")),
+                },
+                Ok(None) => {}
+                Err(()) => self.toast(format!(
+                    "{NO_DIALOG}. Dica: arraste o arquivo .excalidrawlib para a janela."
+                )),
+            },
+            DialogKind::ExportLibrary(items) => {
+                let Some(mut path) =
+                    r.unwrap_or_else(|()| fallback_path("biblioteca", library::EXT))
+                else {
+                    return;
+                };
+                if path.extension().is_none() {
+                    path.set_extension(library::EXT);
+                }
+                match std::fs::write(&path, library::to_json(&items)) {
+                    Ok(()) => self.toast(format!("Biblioteca exportada: {}", path.display())),
+                    Err(e) => self.toast(format!("Erro ao exportar: {e}")),
+                }
+            }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Biblioteca
+    // ------------------------------------------------------------------
+
+    fn save_library(&mut self) {
+        let ids: HashSet<&str> = self.library.iter().map(|i| i.id.as_str()).collect();
+        self.library_selected.retain(|s| ids.contains(s.as_str()));
+        self.library_thumbs.retain(|k, _| ids.contains(k.as_str()));
+        if let Some(p) = library::path()
+            && let Err(e) = library::save(&p, &self.library)
+        {
+            self.toast(format!("Erro ao salvar a biblioteca: {e}"));
+        }
+    }
+
+    /// "Adicionar à biblioteca": a seleção (com os grupos) vira um item.
+    pub fn add_selection_to_library(&mut self) {
+        let els: Vec<Element> = self.selected_elements().into_iter().cloned().collect();
+        if els.is_empty() {
+            return;
+        }
+        library::merge(&mut self.library, vec![LibraryItem::new(els)]);
+        self.save_library();
+        self.show_library = true;
+        self.toast("Adicionado à biblioteca");
+    }
+
+    /// Junta os itens de um `.excalidrawlib` à biblioteca.
+    pub fn import_library_text(&mut self, text: &str) {
+        match library::parse(text) {
+            Ok(items) => {
+                let total = items.len();
+                let n = library::merge(&mut self.library, items);
+                self.save_library();
+                self.show_library = true;
+                self.toast(match (n, total) {
+                    (0, 0) => "A biblioteca importada está vazia".to_string(),
+                    (0, _) => "Esses itens já estão na biblioteca".to_string(),
+                    (1, _) => "1 item importado para a biblioteca".to_string(),
+                    _ => format!("{n} itens importados para a biblioteca"),
+                });
+            }
+            Err(e) => self.toast(format!("Não foi possível importar: {e}")),
+        }
+    }
+
+    pub fn import_library_dialog(&mut self) {
+        let fut = rfd::AsyncFileDialog::new()
+            .set_title("Importar biblioteca")
+            .add_filter("Biblioteca do Excalidraw", &[library::EXT, "json"])
+            .pick_file();
+        self.start_dialog(DialogKind::ImportLibrary, fut);
+    }
+
+    /// Exporta os itens marcados ou, sem marcação, a biblioteca inteira.
+    pub fn export_library_dialog(&mut self) {
+        let items: Vec<LibraryItem> = if self.library_selected.is_empty() {
+            self.library.clone()
+        } else {
+            self.library
+                .iter()
+                .filter(|i| self.library_selected.contains(&i.id))
+                .cloned()
+                .collect()
+        };
+        if items.is_empty() {
+            self.toast("A biblioteca está vazia");
+            return;
+        }
+        let fut = rfd::AsyncFileDialog::new()
+            .set_title("Exportar biblioteca")
+            .add_filter("Biblioteca do Excalidraw", &[library::EXT])
+            .set_file_name(format!("biblioteca.{}", library::EXT))
+            .save_file();
+        self.start_dialog(DialogKind::ExportLibrary(items), fut);
+    }
+
+    /// Remove os itens marcados ou, sem marcação, todos.
+    pub fn remove_library_items(&mut self) {
+        if self.library_selected.is_empty() {
+            self.library.clear();
+        } else {
+            let sel = std::mem::take(&mut self.library_selected);
+            self.library.retain(|i| !sel.contains(&i.id));
+        }
+        self.save_library();
+    }
+
+    /// Insere uma cópia do item centralizada em `at` (mundo) e a seleciona.
+    pub fn insert_library_item(&mut self, id: &str, at: P) {
+        let Some(els) = self
+            .library
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.elements.clone())
+        else {
+            return;
+        };
+        let Some(b) = geom::scene_bounds(els.iter()) else {
+            return;
+        };
+        self.finish_editing();
+        self.finish_linear();
+        let before = self.elements.clone();
+        let copies = Self::clone_with_new_ids(&els, at - b.center());
+        self.selected = copies.iter().map(|e| e.id.clone()).collect();
+        self.elements.extend(copies);
+        self.tool = Tool::Select;
+        self.commit(before);
+    }
+
+    /// Centro da área visível do canvas, em coordenadas do mundo.
+    pub fn view_center(&self, view: egui::Rect) -> P {
+        self.cam.w(view.center())
     }
 
     /// Executa a ação que esperava a confirmação de alterações não salvas.
@@ -620,6 +786,7 @@ impl App {
             Pending::New => self.new_scene(),
             Pending::Open => self.open_dialog(),
             Pending::Clear => self.clear_canvas(),
+            Pending::ClearLibrary => self.remove_library_items(),
         }
     }
 
@@ -1691,6 +1858,10 @@ impl App {
         let Some(pos) = pos else { return };
         let wp = self.cam.w(pos);
         self.pointer_world = wp;
+        // arrastando um item da biblioteca: o painel cuida do ponteiro
+        if self.library_drag.is_some() {
+            return;
+        }
 
         // menu de contexto: um clique fora só fecha o menu
         if over && (pressed || mid_pressed) && self.context_menu.take().is_some() {

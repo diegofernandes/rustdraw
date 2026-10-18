@@ -13,6 +13,7 @@ mod edit;
 mod export;
 mod fonts;
 mod geom;
+mod library;
 mod mcp;
 mod model;
 mod render;
