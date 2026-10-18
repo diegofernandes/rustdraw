@@ -103,6 +103,7 @@ Cada ferramenta recebe o caminho do arquivo em `file` (opcional se um arquivo pa
 | Modo de visualização | `Alt+R` | | Travar / destravar | `Ctrl+Shift+L` |
 | Estatísticas | `Alt+/` | | Tamanho da fonte | `Ctrl+Shift+<` / `>` |
 | Ajustar à seleção | `Shift+2` / `Shift+3` | | Limpar o canvas | `Ctrl+Delete` |
+| Encaixar em objetos | `Alt+S` (`Ctrl` inverte ao arrastar) | | | |
 
 Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`. O botão direito abre o menu de opções.
 
@@ -113,6 +114,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/model.rs` | Elementos e cena no formato `.excalidraw` (serde), cores |
 | `src/rough.rs` | Geração de traços irregulares (porta do rough.js) e hachuras |
 | `src/geom.rs` | Elementos → primitivas de desenho, caixas, hit-test |
+| `src/snap.rs` | Encaixe em objetos: pontos de referência, deslocamento e guias |
 | `src/render.rs` | Desenho das primitivas no canvas (egui) |
 | `src/export.rs` | PNG (tiny-skia + fontdue) e SVG |
 | `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, histórico, arquivos |
@@ -126,7 +128,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 As três saídas (tela, PNG e SVG) usam as mesmas primitivas geradas em `geom.rs`, então o que se vê é o que se exporta.
 
 ```bash
-cargo test   # modelo/round-trip, geometria, rough, exportação, redimensionamento, ligação de setas, edição por comandos, MCP
+cargo test   # modelo/round-trip, geometria, rough, exportação, redimensionamento, ligação de setas, encaixe em objetos, edição por comandos, MCP
 ```
 
 ## Limitações atuais

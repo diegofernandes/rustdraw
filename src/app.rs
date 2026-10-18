@@ -7,6 +7,7 @@ use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::library::{self, LibraryItem};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
 use crate::render::{self, Cam, PaintCtx};
+use crate::snap;
 use crate::watch::Watch;
 use egui::{Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Sense, Stroke, StrokeKind};
 use serde_json::{Map, Value};
@@ -83,6 +84,8 @@ pub enum Drag {
     Move {
         start: P,
         originals: Vec<(String, f64, f64)>,
+        /// Caixa da seleção no início, para o encaixe em objetos.
+        bounds: Option<Rect>,
         before: Vec<Element>,
         moved: bool,
     },
@@ -174,6 +177,10 @@ pub struct App {
     last_watch: f64,
     pub dark: bool,
     pub grid: bool,
+    /// Encaixe em objetos (Alt+S), como o "Snap to objects" do Excalidraw.
+    pub snap: bool,
+    /// Guias de alinhamento do encaixe em andamento.
+    pub snap_guides: Vec<snap::Guide>,
     pub view_bg: String,
     pub show_menu: bool,
     pub context_menu: Option<ContextMenu>,
@@ -202,7 +209,7 @@ pub struct App {
     pub now: f64,
     pending_fit: bool,
     needs_measure: HashSet<String>,
-    last_prefs: Option<(bool, bool, String)>,
+    last_prefs: Option<(bool, bool, bool, String)>,
     /// Diálogo de arquivos aberto, aguardando a escolha do usuário.
     dialog: Option<DialogTask>,
     ctx: egui::Context,
@@ -347,6 +354,8 @@ impl App {
             last_watch: 0.0,
             dark: false,
             grid: false,
+            snap: false,
+            snap_guides: vec![],
             view_bg: "#ffffff".into(),
             show_menu: false,
             context_menu: None,
@@ -418,6 +427,11 @@ impl App {
                 .get("theme")
                 .and_then(|v| v.as_str())
                 .is_some_and(|t| t == "dark");
+            app.snap = f
+                .app_state
+                .get("objectsSnapModeEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             app.apply_scene(f);
         }
         app
@@ -989,6 +1003,7 @@ impl App {
                 "theme".into(),
                 if self.dark { "dark" } else { "light" }.into(),
             );
+            obj.insert("objectsSnapModeEnabled".into(), self.snap.into());
         }
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -1990,6 +2005,38 @@ impl App {
         self.elements.iter().find(|e| &e.id == id)
     }
 
+    /// Liga/desliga a grade; como no Excalidraw, desliga o encaixe em objetos.
+    pub fn toggle_grid(&mut self) {
+        self.grid = !self.grid;
+        if self.grid {
+            self.snap = false;
+        }
+    }
+
+    /// Liga/desliga o encaixe em objetos (Alt+S); desliga a grade.
+    pub fn toggle_snap(&mut self) {
+        self.snap = !self.snap;
+        if self.snap {
+            self.grid = false;
+        }
+    }
+
+    /// Se o encaixe em objetos vale agora: Ctrl/Cmd inverte a opção enquanto
+    /// estiver pressionado (com a grade ligada, só desliga), como no Excalidraw.
+    fn snapping(&self, mods: Modifiers) -> bool {
+        if self.snap {
+            !mods.command
+        } else {
+            mods.command && !self.grid
+        }
+    }
+
+    /// Pontos de encaixe das formas visíveis, menos as de `skip`.
+    fn snap_refs(&self, skip: &HashSet<String>) -> Vec<P> {
+        let view = Rect::from_two(self.cam.w(self.view.min), self.cam.w(self.view.max));
+        snap::reference_points(&self.elements, skip, view)
+    }
+
     /// Posições (mundo) das alças da seleção única.
     pub fn handles(&self) -> Vec<(Handle, P)> {
         let Some(el) = self.single_selected() else {
@@ -2247,9 +2294,21 @@ impl App {
                     .filter(|e| self.selected.contains(&e.id) && !e.locked)
                     .map(|e| (e.id.clone(), e.x, e.y))
                     .collect();
+                let bounds = Rect::from_points(
+                    &self
+                        .selected_elements()
+                        .into_iter()
+                        .filter(|e| !e.locked)
+                        .flat_map(|e| {
+                            let b = geom::aabb(e);
+                            [b.min, b.max]
+                        })
+                        .collect::<Vec<_>>(),
+                );
                 self.drag = Drag::Move {
                     start: p,
                     originals,
+                    bounds,
                     before,
                     moved: false,
                 };
@@ -2344,6 +2403,8 @@ impl App {
     fn on_move(&mut self, p: P, screen: Pos2, mods: Modifiers) {
         let g = self.grid;
         let zoom = self.cam.zoom;
+        let snapping = self.snapping(mods);
+        self.snap_guides.clear();
         match &mut self.drag {
             Drag::None => {}
             Drag::Pan { last } => {
@@ -2369,7 +2430,6 @@ impl App {
                     ]);
                     el.touch();
                     self.bind_end_at(&id, true, q, mods);
-                    return;
                 } else {
                     let mut d = q - origin;
                     if mods.shift {
@@ -2381,13 +2441,36 @@ impl App {
                     } else {
                         (origin, origin + d)
                     };
-                    let r = Rect::from_two(a, b);
+                    let mut r = Rect::from_two(a, b);
+                    if snapping {
+                        let refs = self.snap_refs(&HashSet::from([id.clone()]));
+                        let tol = snap::SNAP_PX / zoom;
+                        // encaixa o canto arrastado (com Alt, os dois cantos se movem)
+                        let corner = origin + d;
+                        let mut off = snap::offset(&[corner], &refs, tol, (true, true));
+                        if mods.shift {
+                            // mantém o quadrado: encaixa o eixo mais próximo
+                            let (sx, sy) = (d.x.signum(), d.y.signum());
+                            let use_x =
+                                off.x != 0.0 && (off.y == 0.0 || off.x.abs() <= off.y.abs());
+                            let dm = if use_x { off.x * sx } else { off.y * sy };
+                            off = P::new(dm * sx, dm * sy);
+                        }
+                        let d = d + off;
+                        r = if mods.alt {
+                            Rect::from_two(origin - d, origin + d)
+                        } else {
+                            Rect::from_two(origin, origin + d)
+                        };
+                        self.snap_guides = snap::guides(&snap::box_points(r), &refs);
+                    }
+                    let Some(el) = self.get_mut(&id) else { return };
                     el.x = r.min.x as f64;
                     el.y = r.min.y as f64;
                     el.width = r.width() as f64;
                     el.height = r.height() as f64;
+                    el.touch();
                 }
-                el.touch();
             }
             Drag::LinearMulti { id, .. } => {
                 let id = id.clone();
@@ -2427,15 +2510,20 @@ impl App {
             Drag::Move {
                 start,
                 originals,
+                bounds,
                 moved,
                 ..
             } => {
+                let bounds = *bounds;
                 let mut d = p - *start;
+                let mut axes = (true, true);
                 if mods.shift {
                     if d.x.abs() > d.y.abs() {
-                        d.y = 0.0
+                        d.y = 0.0;
+                        axes.1 = false;
                     } else {
-                        d.x = 0.0
+                        d.x = 0.0;
+                        axes.0 = false;
                     }
                 }
                 if d.len() * zoom > 1.0 {
@@ -2452,6 +2540,12 @@ impl App {
                     d.y = snap(*oy as f32 + d.y, true) - *oy as f32;
                 }
                 let moving: HashSet<String> = originals.iter().map(|o| o.0.clone()).collect();
+                if snapping && let Some(b) = bounds {
+                    let refs = self.snap_refs(&moving);
+                    let pts = |d: P| snap::box_points(Rect::from_two(b.min + d, b.max + d));
+                    d = d + snap::offset(&pts(d), &refs, snap::SNAP_PX / zoom, axes);
+                    self.snap_guides = snap::guides(&pts(d), &refs);
+                }
                 self.unbind_detached(&moving);
                 for (id, ox, oy) in originals {
                     if let Some(el) = self.get_mut(&id) {
@@ -2488,7 +2582,26 @@ impl App {
             }
             Drag::Resize { handle, orig, .. } => {
                 let (handle, orig) = (*handle, orig.clone());
+                let mut p = p;
+                let axes = (
+                    matches!(
+                        handle,
+                        Handle::E | Handle::W | Handle::NE | Handle::NW | Handle::SE | Handle::SW
+                    ),
+                    matches!(
+                        handle,
+                        Handle::N | Handle::S | Handle::NE | Handle::NW | Handle::SE | Handle::SW
+                    ),
+                );
+                let refs = (snapping && orig.angle == 0.0 && (axes.0 || axes.1))
+                    .then(|| self.snap_refs(&HashSet::from([orig.id.clone()])));
+                if let Some(refs) = &refs {
+                    p = p + snap::offset(&[p], refs, snap::SNAP_PX / zoom, axes);
+                }
                 let updated = resize(&orig, handle, p, mods.shift, g);
+                if let Some(refs) = &refs {
+                    self.snap_guides = snap::guides(&snap::box_points(geom::aabb(&updated)), refs);
+                }
                 let n = orig.points().len();
                 let end_point = match handle {
                     Handle::Point(i) if orig.kind == "arrow" && (i == 0 || i + 1 == n) => {
@@ -2543,6 +2656,7 @@ impl App {
     fn on_release(&mut self, p: P) {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.bind_hint = None;
+        self.snap_guides.clear();
         let tol = 3.0 / self.cam.zoom as f64;
         match drag {
             Drag::Create { id, before, origin } => {
@@ -2658,7 +2772,10 @@ impl App {
             self.dark = !self.dark;
         }
         if kc(cmd, Key::Quote) {
-            self.grid = !self.grid;
+            self.toggle_grid();
+        }
+        if kc(alt, Key::S) {
+            self.toggle_snap();
         }
         for m in [cmd, sh, cs] {
             if kc(m, Key::Equals) || k(m, Key::Plus) {
@@ -3098,6 +3215,7 @@ impl App {
             }
         }
         self.paint_bind_hint(&painter);
+        self.paint_snap_guides(&painter);
         if let Drag::BoxSelect { start, cur, .. } = &self.drag {
             let r = egui::Rect::from_two_pos(self.cam.s(*start), self.cam.s(*cur));
             painter.rect(
@@ -3107,6 +3225,25 @@ impl App {
                 sel_stroke,
                 StrokeKind::Middle,
             );
+        }
+    }
+
+    /// Guias do encaixe em objetos: linhas com um "x" em cada ponto alinhado.
+    fn paint_snap_guides(&self, painter: &egui::Painter) {
+        let col = if self.dark {
+            Color32::from_rgb(0xff, 0x87, 0x87)
+        } else {
+            Color32::from_rgb(0xff, 0x6b, 0x6b)
+        };
+        let stroke = Stroke::new(1.0, col);
+        for g in &self.snap_guides {
+            painter.line_segment([self.cam.s(g.from), self.cam.s(g.to)], stroke);
+            for p in &g.points {
+                let s = self.cam.s(*p);
+                let r = 3.0;
+                painter.line_segment([s + egui::vec2(-r, -r), s + egui::vec2(r, r)], stroke);
+                painter.line_segment([s + egui::vec2(-r, r), s + egui::vec2(r, -r)], stroke);
+            }
         }
     }
 
@@ -3148,7 +3285,7 @@ impl App {
         self.now = ctx.input(|i| i.time);
         self.poll_dialog();
         self.poll_watch(ctx);
-        let prefs = (self.dark, self.grid, self.view_bg.clone());
+        let prefs = (self.dark, self.grid, self.snap, self.view_bg.clone());
         if self.last_prefs.as_ref() != Some(&prefs) {
             if self.last_prefs.is_some() {
                 self.autosave_pending = true;
