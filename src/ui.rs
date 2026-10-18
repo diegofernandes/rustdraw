@@ -1040,6 +1040,7 @@ enum Act {
     CopyText,
     SelectAll,
     UnlockAll,
+    AddToLibrary,
     Grid,
     Snap,
     Zen,
@@ -1068,7 +1069,7 @@ enum Entry {
 
 /// Itens do menu do botão direito, na mesma ordem do Excalidraw
 /// (`App.tsx`, `getContextMenuItems`). Ficam de fora os itens de recursos que o
-/// RustDraw ainda não tem (frames, biblioteca, links, recorte de imagem...).
+/// RustDraw ainda não tem (frames, links, recorte de imagem...).
 fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
     use Entry::{Item, Sep};
     let has_elements = !app.elements.is_empty();
@@ -1142,6 +1143,7 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
         };
         v.extend([
             Sep,
+            Item("Adicionar à biblioteca", "", Act::AddToLibrary, None),
             Item("Enviar para trás", "Ctrl+[", Act::SendBackward, None),
             Item("Trazer para frente", "Ctrl+]", Act::BringForward, None),
             Item("Enviar para o fundo", to_back, Act::SendToBack, None),
@@ -1183,6 +1185,7 @@ fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
         Act::CopyText => app.copy_text(ctx),
         Act::SelectAll => app.select_all(),
         Act::UnlockAll => app.unlock_all(),
+        Act::AddToLibrary => app.add_selection_to_library(),
         Act::Grid => app.toggle_grid(),
         Act::Snap => app.toggle_snap(),
         Act::Zen => app.zen_mode = !app.zen_mode,
@@ -1638,6 +1641,35 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
 
 fn confirm_window(app: &mut App, ctx: &egui::Context) {
     let Some(pending) = app.confirm else { return };
+    if pending == Pending::ClearLibrary {
+        let some = !app.library_selected.is_empty();
+        egui::Window::new(if some {
+            "Remover da biblioteca"
+        } else {
+            "Limpar a biblioteca"
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(if some {
+                "Remover os itens marcados da biblioteca? Isto não pode ser desfeito."
+            } else {
+                "Remover todos os itens da biblioteca? Isto não pode ser desfeito."
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(if some { "Remover" } else { "Limpar" }).clicked() {
+                    app.confirm = None;
+                    app.remove_library_items();
+                }
+                if ui.button("Cancelar").clicked() {
+                    app.confirm = None;
+                }
+            });
+        });
+        return;
+    }
     if pending == Pending::Clear {
         egui::Window::new("Limpar o canvas")
             .collapsible(false)
@@ -1774,6 +1806,9 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
     if !app.view_mode && !app.zen_mode {
         props_panel(app, ctx);
         menu(app, ctx);
+        library_panel(app, ctx, view);
+    } else {
+        app.library_drag = None;
     }
     bottom_bar(app, ctx, view);
     mode_exit_button(app, ctx);
@@ -1830,7 +1865,17 @@ fn stats_window(app: &mut App, ctx: &egui::Context) {
     egui::Window::new("Estatísticas")
         .collapsible(false)
         .resizable(false)
-        .anchor(Align2::RIGHT_TOP, vec2(-12.0, 64.0))
+        .anchor(
+            Align2::RIGHT_TOP,
+            vec2(
+                if library_visible(app) {
+                    -(LIB_W + 24.0)
+                } else {
+                    -12.0
+                },
+                64.0,
+            ),
+        )
         .open(&mut open)
         .show(ctx, |ui| {
             egui::Grid::new("stats_grid")
@@ -1873,4 +1918,299 @@ fn stats_window(app: &mut App, ctx: &egui::Context) {
                 });
         });
     app.show_stats = open && app.show_stats;
+}
+
+// ---------------------------------------------------------------------------
+// Biblioteca
+// ---------------------------------------------------------------------------
+
+const LIB_W: f32 = 252.0;
+const LIB_TILE: f32 = 76.0;
+
+fn library_visible(app: &App) -> bool {
+    app.show_library && !app.view_mode && !app.zen_mode
+}
+
+/// Limites e primitivas de um item (calculados uma vez por item).
+fn library_thumb(app: &mut App, id: &str) -> Option<(crate::geom::Rect, Vec<crate::geom::Prim>)> {
+    if !app.library_thumbs.contains_key(id) {
+        let item = app.library.iter().find(|i| i.id == id)?;
+        let b = crate::export::bounds_with_text(&item.elements)?;
+        let prims = item
+            .elements
+            .iter()
+            .flat_map(crate::geom::element_prims)
+            .collect();
+        app.library_thumbs.insert(id.to_string(), (b, prims));
+    }
+    app.library_thumbs.get(id).cloned()
+}
+
+/// Desenha `prims` com o centro de `b` em `at`, na escala `zoom`.
+fn paint_library_prims(
+    app: &App,
+    painter: &Painter,
+    b: &crate::geom::Rect,
+    prims: &[crate::geom::Prim],
+    at: Pos2,
+    zoom: f32,
+    alpha: f32,
+) {
+    let c = b.center();
+    let pc = render::PaintCtx {
+        painter,
+        cam: render::Cam {
+            scroll: crate::geom::P::new(-c.x, -c.y),
+            zoom,
+            origin: at,
+        },
+        dark: app.dark,
+        alpha,
+        hand_ok: app.hand_ok,
+        images: &app.textures,
+    };
+    render::paint_prims(&pc, prims);
+}
+
+/// Painel da biblioteca, à direita, como a barra lateral do Excalidraw:
+/// clique insere no centro da tela, arrastar posiciona, Shift+clique marca.
+fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
+    egui::Area::new(Id::unique("library_btn"))
+        .anchor(Align2::RIGHT_TOP, vec2(-12.0, 12.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            panel_frame(ui)
+                .inner_margin(Margin::same(3))
+                .show(ui, |ui| {
+                    let open = app.show_library;
+                    let text = RichText::new("Biblioteca").color(if open && !app.dark {
+                        Color32::from_rgb(0x43, 0x41, 0x9e)
+                    } else {
+                        fg(ui)
+                    });
+                    let mut b = egui::Button::new(text).min_size(vec2(0.0, 34.0));
+                    b = if open {
+                        b.fill(accent_bg(ui))
+                    } else {
+                        b.frame(false)
+                    };
+                    if ui.add(b).on_hover_text("Biblioteca de formas").clicked() {
+                        app.show_library = !app.show_library;
+                    }
+                });
+        });
+    if !app.show_library {
+        app.library_drag = None;
+        return;
+    }
+    let height = (view.height() - 60.0 - 64.0).max(160.0);
+    let mut insert: Option<String> = None;
+    let resp = egui::Area::new(Id::unique("library"))
+        .anchor(Align2::RIGHT_TOP, vec2(-12.0, 60.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            panel_frame(ui)
+                .inner_margin(Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(LIB_W);
+                    ui.set_height(height);
+                    ui.horizontal(|ui| {
+                        ui.strong("Biblioteca");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(egui::Button::new("✕").frame(false))
+                                .on_hover_text("Fechar")
+                                .clicked()
+                            {
+                                app.show_library = false;
+                            }
+                        });
+                    });
+                    let marked = app.library_selected.len();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if ui
+                            .small_button("Importar…")
+                            .on_hover_text("Adicionar itens de um arquivo .excalidrawlib")
+                            .clicked()
+                        {
+                            app.import_library_dialog();
+                        }
+                        let empty = app.library.is_empty();
+                        ui.add_enabled_ui(!empty, |ui| {
+                            let (export, remove) = if marked > 0 {
+                                ("Exportar marcados…", "Remover marcados")
+                            } else {
+                                ("Exportar…", "Limpar")
+                            };
+                            if ui
+                                .small_button(export)
+                                .on_hover_text("Salvar como .excalidrawlib")
+                                .clicked()
+                            {
+                                app.export_library_dialog();
+                            }
+                            if ui.small_button(remove).clicked() {
+                                app.confirm = Some(Pending::ClearLibrary);
+                            }
+                        });
+                    });
+                    if marked > 0 {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(if marked == 1 {
+                                    "1 item marcado".to_string()
+                                } else {
+                                    format!("{marked} itens marcados")
+                                })
+                                .size(11.5)
+                                .color(ui.visuals().weak_text_color()),
+                            );
+                            if ui.small_button("Desmarcar").clicked() {
+                                app.library_selected.clear();
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+                    let can_add = !app.selected.is_empty();
+                    if app.library.is_empty() && !can_add {
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new(
+                                "Nenhum item ainda.\n\nSelecione formas ou grupos no canvas e \
+                             clique em + (ou use \"Adicionar à biblioteca\" no botão direito), \
+                             ou importe um arquivo .excalidrawlib.",
+                            )
+                            .size(12.0)
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            let ids: Vec<Option<String>> = can_add
+                                .then_some(None)
+                                .into_iter()
+                                .chain(app.library.iter().map(|i| Some(i.id.clone())))
+                                .collect();
+                            for row in ids.chunks(3) {
+                                ui.horizontal(|ui| {
+                                    for cell in row {
+                                        library_tile(app, ui, cell.as_deref(), &mut insert);
+                                    }
+                                });
+                            }
+                        });
+                });
+        })
+        .response;
+    if let Some(id) = insert {
+        let at = app.view_center(view);
+        app.insert_library_item(&id, at);
+    }
+    // arrastar um item para o canvas
+    let Some(id) = app.library_drag.clone() else {
+        return;
+    };
+    let (pos, released) = ctx.input(|i| (i.pointer.latest_pos(), !i.pointer.primary_down()));
+    let on_canvas = pos.filter(|p| view.contains(*p) && !resp.rect.contains(*p));
+    if released {
+        app.library_drag = None;
+        if let Some(p) = on_canvas {
+            let at = app.cam.w(p);
+            app.insert_library_item(&id, at);
+        }
+        return;
+    }
+    ctx.set_cursor_icon(if on_canvas.is_some() {
+        egui::CursorIcon::Grabbing
+    } else {
+        egui::CursorIcon::NoDrop
+    });
+    if let (Some(p), Some((b, prims))) = (on_canvas, library_thumb(app, &id)) {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            Id::unique("library_ghost"),
+        ));
+        paint_library_prims(app, &painter, &b, &prims, p, app.cam.zoom, 0.6);
+    }
+}
+
+/// Um quadradinho da biblioteca: `None` é o botão "+" que adiciona a seleção.
+fn library_tile(app: &mut App, ui: &mut Ui, id: Option<&str>, insert: &mut Option<String>) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(LIB_TILE, LIB_TILE), Sense::click_and_drag());
+    let marked = id.is_some_and(|id| app.library_selected.contains(id));
+    let hovered = resp.hovered();
+    let fill = if marked {
+        accent_bg(ui)
+    } else if hovered && app.library_drag.is_none() {
+        ui.visuals().widgets.hovered.weak_bg_fill
+    } else {
+        ui.visuals().faint_bg_color
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 6.0, fill);
+    p.rect_stroke(
+        rect,
+        6.0,
+        if marked {
+            Stroke::new(2.0, SELECTION)
+        } else {
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+        },
+        StrokeKind::Inside,
+    );
+    let Some(id) = id else {
+        let c = fg(ui);
+        let m = rect.center();
+        p.line_segment(
+            [m - vec2(10.0, 0.0), m + vec2(10.0, 0.0)],
+            Stroke::new(2.0, c),
+        );
+        p.line_segment(
+            [m - vec2(0.0, 10.0), m + vec2(0.0, 10.0)],
+            Stroke::new(2.0, c),
+        );
+        if resp
+            .on_hover_text("Adicionar a seleção à biblioteca")
+            .clicked()
+        {
+            app.add_selection_to_library();
+        }
+        return;
+    };
+    if let Some((b, prims)) = library_thumb(app, id) {
+        let inner = rect.shrink(8.0);
+        let zoom = (inner.width() / b.width().max(1.0))
+            .min(inner.height() / b.height().max(1.0))
+            .min(1.5);
+        let painter = ui.painter_at(rect.shrink(2.0));
+        paint_library_prims(app, &painter, &b, &prims, rect.center(), zoom, 1.0);
+    }
+    if resp.drag_started() {
+        app.library_drag = Some(id.to_string());
+    }
+    let name = app
+        .library
+        .iter()
+        .find(|i| i.id == id)
+        .and_then(|i| i.name.clone());
+    let tip = match name {
+        Some(n) => {
+            format!("{n}\nClique para inserir · arraste para posicionar · Shift+clique marca")
+        }
+        None => "Clique para inserir · arraste para posicionar · Shift+clique marca".into(),
+    };
+    let resp = resp.on_hover_text(tip);
+    if resp.clicked() {
+        if ui.input(|i| i.modifiers.shift) || !app.library_selected.is_empty() {
+            if !app.library_selected.remove(id) {
+                app.library_selected.insert(id.to_string());
+            }
+        } else {
+            *insert = Some(id.to_string());
+        }
+    }
 }
