@@ -7,6 +7,7 @@
 //! de uma seta em formas pelo id.
 
 use crate::binding::{self, ANCHORS, Binding};
+use crate::files;
 use crate::fonts::{self, Family};
 use crate::geom;
 use crate::model::{Element, SceneFile, Style, new_id};
@@ -14,7 +15,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 
-const KINDS: [&str; 7] = [
+const KINDS: [&str; 8] = [
     "rectangle",
     "diamond",
     "ellipse",
@@ -22,6 +23,7 @@ const KINDS: [&str; 7] = [
     "line",
     "arrow",
     "freedraw",
+    "image",
 ];
 const ANCHOR_NAMES: [&str; 4] = ["top", "right", "bottom", "left"];
 
@@ -199,6 +201,9 @@ pub fn summary(el: &Element, all: &[Element]) -> Value {
             if let Some(c) = el.str_field("containerId") {
                 o.insert("containerId".into(), json!(c));
             }
+        }
+        "image" => {
+            o.insert("fileId".into(), json!(el.str_field("fileId")));
         }
         "line" | "arrow" | "freedraw" => {
             let pts: Vec<Value> = el
@@ -577,8 +582,29 @@ fn finish(els: &mut [Element], changed: &HashSet<String>) {
 // Operações
 // ---------------------------------------------------------------------------
 
+/// Imagem de um item `image`: o arquivo em `path` (guardado em `files`) ou um
+/// `fileId` que já está na cena. Devolve o id e o tamanho natural.
+fn image_source(files: &mut Map<String, Value>, s: &Spec) -> Result<files::Added, String> {
+    if let Some(path) = string(s, "path")? {
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        return files::add_bytes(files, &bytes).map_err(|e| format!("{path}: {e}"));
+    }
+    let id = string(s, "fileId")?.ok_or("imagem precisa de `path` (arquivo PNG/JPG)")?;
+    let img = files::decode(files, id).ok_or_else(|| format!("fileId {id:?} não está na cena"))?;
+    Ok(files::Added {
+        id: id.into(),
+        width: img.width(),
+        height: img.height(),
+    })
+}
+
 /// Adiciona elementos (na ordem dada, por cima dos existentes). Devolve os ids.
-pub fn add(els: &mut Vec<Element>, specs: &[Value]) -> Result<Vec<String>, String> {
+/// Imagens novas entram em `files`.
+pub fn add(
+    els: &mut Vec<Element>,
+    files: &mut Map<String, Value>,
+    specs: &[Value],
+) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
     for (i, v) in specs.iter().enumerate() {
         let s = spec_of(v, i)?;
@@ -597,7 +623,25 @@ pub fn add(els: &mut Vec<Element>, specs: &[Value]) -> Result<Vec<String>, Strin
             el.width = 160.0;
             el.height = 80.0;
         }
+        let image = if kind == "image" {
+            let a = image_source(files, s).map_err(ctx)?;
+            let mut img = files::image_element(&a, 0.0, 0.0, f64::MAX);
+            img.id = el.id.clone();
+            (img.x, img.y) = (0.0, 0.0);
+            el = img;
+            Some((a.width as f64, a.height as f64))
+        } else {
+            None
+        };
         apply_common(&mut el, s).map_err(ctx)?;
+        if let Some((nw, nh)) = image {
+            // só um dos lados dado: o outro segue a proporção da imagem
+            match (s.contains_key("width"), s.contains_key("height")) {
+                (true, false) => el.height = (el.width * nh / nw).max(1.0),
+                (false, true) => el.width = (el.height * nw / nh).max(1.0),
+                _ => {}
+            }
+        }
         if kind == "text" {
             if el.text().is_empty() {
                 return Err(ctx("texto precisa de `text`".into()));
@@ -717,6 +761,7 @@ mod tests {
         let mut els = Vec::new();
         add(
             &mut els,
+            &mut Map::new(),
             &[
                 json!({"type": "rectangle", "id": "a", "x": 0, "y": 0, "width": 100, "height": 60, "label": "Cliente"}),
                 json!({"type": "ellipse", "id": "b", "x": 300, "y": 0, "width": 100, "height": 60}),
@@ -773,18 +818,20 @@ mod tests {
     #[test]
     fn errors_are_reported_and_text_is_measured() {
         let mut els = Vec::new();
-        let e = add(&mut els, &[json!({"type": "star"})]).unwrap_err();
+        let e = add(&mut els, &mut Map::new(), &[json!({"type": "star"})]).unwrap_err();
         assert!(e.contains("item 0"), "{e}");
-        assert!(add(&mut els, &[json!({"type": "arrow"})]).is_err());
+        assert!(add(&mut els, &mut Map::new(), &[json!({"type": "arrow"})]).is_err());
         assert!(
             add(
                 &mut els,
+                &mut Map::new(),
                 &[json!({"type": "line", "start": {"x": 0, "y": 0}, "end": {"element": "x"}})]
             )
             .is_err()
         );
         let ids = add(
             &mut els,
+            &mut Map::new(),
             &[json!({"type": "text", "text": "Olá\nmundo", "fontSize": 20})],
         )
         .unwrap();
@@ -793,5 +840,42 @@ mod tests {
         assert_eq!(t.height, 50.0);
         let sum = summary(t, &els);
         assert_eq!(sum["text"], json!("Olá\nmundo"));
+    }
+
+    #[test]
+    fn adds_images_from_a_path() {
+        let dir = std::env::temp_dir().join(format!("rustdraw-img-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([0, 0, 255, 255]));
+        std::fs::write(&path, files::encode_png(&img).unwrap()).unwrap();
+        let mut els = Vec::new();
+        let mut fs = Map::new();
+        let p = path.to_str().unwrap();
+        let ids = add(
+            &mut els,
+            &mut fs,
+            &[
+                json!({"type": "image", "path": p, "x": 10, "y": 5}),
+                json!({"type": "image", "path": p, "width": 100}),
+            ],
+        )
+        .unwrap();
+        assert_eq!(fs.len(), 1, "a mesma imagem entra uma vez só");
+        let (a, b) = (&els[0], &els[1]);
+        assert_eq!((a.x, a.y, a.width, a.height), (10.0, 5.0, 40.0, 20.0));
+        assert_eq!((b.width, b.height), (100.0, 50.0));
+        assert_eq!(a.str_field("fileId"), b.str_field("fileId"));
+        assert_eq!(summary(a, &els)["fileId"], json!(fs.keys().next().unwrap()));
+        let fid = a.str_field("fileId").unwrap().to_string();
+        add(
+            &mut els,
+            &mut fs,
+            &[json!({"type": "image", "fileId": fid})],
+        )
+        .unwrap();
+        assert!(add(&mut els, &mut fs, &[json!({"type": "image"})]).is_err());
+        assert_eq!(ids.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

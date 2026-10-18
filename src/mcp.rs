@@ -21,7 +21,8 @@ const PREVIEW_MAX_PX: f32 = 1600.0;
 const INSTRUCTIONS: &str = "Edita desenhos .excalidraw do RustDraw (editor no estilo Excalidraw). \
 Use get_scene para ver os elementos e seus ids, add_elements para criar formas, textos e setas \
 (setas ligam em formas com start/end {\"element\": id}), update_elements e delete_elements para \
-mudar, e preview para conferir o resultado como imagem. Coordenadas em pixels, y cresce para baixo.";
+mudar, e preview para conferir o resultado como imagem. Imagens entram com add_elements \
+{\"type\": \"image\", \"path\": arquivo PNG/JPG}. Coordenadas em pixels, y cresce para baixo.";
 
 pub struct Server {
     default_file: Option<PathBuf>,
@@ -137,15 +138,15 @@ impl Server {
         let out = match name {
             "new_scene" => self.new_scene(args),
             "get_scene" => self.get_scene(args),
-            "add_elements" => self.modify(args, "elements", |els, v| {
-                let ids = edit::add(els, list(v)?)?;
+            "add_elements" => self.modify(args, "elements", |els, files, v| {
+                let ids = edit::add(els, files, list(v)?)?;
                 Ok(json!({"added": ids}))
             }),
-            "update_elements" => self.modify(args, "elements", |els, v| {
+            "update_elements" => self.modify(args, "elements", |els, _, v| {
                 let ids = edit::update(els, list(v)?)?;
                 Ok(json!({"updated": ids}))
             }),
-            "delete_elements" => self.modify(args, "ids", |els, v| {
+            "delete_elements" => self.modify(args, "ids", |els, _, v| {
                 let ids: Vec<String> = serde_json::from_value(v.clone())
                     .map_err(|_| "`ids` precisa ser uma lista de ids".to_string())?;
                 let n = edit::delete(els, &ids)?;
@@ -216,14 +217,20 @@ impl Server {
         &self,
         args: &Map<String, Value>,
         key: &str,
-        f: impl FnOnce(&mut Vec<crate::model::Element>, &Value) -> Result<Value, String>,
+        f: impl FnOnce(
+            &mut Vec<crate::model::Element>,
+            &mut Map<String, Value>,
+            &Value,
+        ) -> Result<Value, String>,
     ) -> Result<Value, String> {
         let path = self.file(args)?;
         let v = args.get(key).ok_or_else(|| format!("falta `{key}`"))?;
         let mut scene = edit::load(&path)?;
         let mut els = scene.elements.clone();
-        let out = f(&mut els, v)?;
+        let mut files = scene.files_map();
+        let out = f(&mut els, &mut files, v)?;
         scene.elements = els;
+        scene.set_files(&files);
         edit::save(&path, &scene)?;
         Ok(out)
     }
@@ -241,6 +248,7 @@ impl Server {
         if let Some(bg) = scene.view_background() {
             o.view_background = bg;
         }
+        o.files = scene.files_map();
         o
     }
 
@@ -300,7 +308,9 @@ fn element_schema(creating: bool) -> Value {
         } else {
             "Id do elemento a alterar."
         }},
-        "type": {"type": "string", "enum": ["rectangle", "diamond", "ellipse", "text", "line", "arrow", "freedraw"]},
+        "type": {"type": "string", "enum": ["rectangle", "diamond", "ellipse", "text", "line", "arrow", "freedraw", "image"]},
+        "path": {"type": "string", "description": "Imagem: caminho de um PNG, JPG, GIF ou WebP no disco; é embutido no arquivo. Sem width/height usa o tamanho da imagem (até 1440 px); com um só deles mantém a proporção."},
+        "fileId": {"type": "string", "description": "Imagem: reaproveita uma imagem que já está na cena (em vez de `path`)."},
         "x": {"type": "number", "description": "Canto superior esquerdo (texto: ponto de ancoragem conforme textAlign; linhas: origem de `points`)."},
         "y": {"type": "number"},
         "width": {"type": "number", "description": "Formas. Padrão 160."},
@@ -336,7 +346,10 @@ fn element_schema(creating: bool) -> Value {
         json!(["id"])
     };
     if !creating {
-        props.as_object_mut().unwrap().remove("type");
+        let props = props.as_object_mut().unwrap();
+        for k in ["type", "path", "fileId"] {
+            props.remove(k);
+        }
     }
     json!({"type": "object", "properties": props, "required": required})
 }
