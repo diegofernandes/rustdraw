@@ -18,6 +18,7 @@ mod mcp;
 mod model;
 mod render;
 mod rough;
+mod snap;
 mod ui;
 mod watch;
 

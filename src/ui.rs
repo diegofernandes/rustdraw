@@ -985,7 +985,17 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 }
                 ui.separator();
                 ui.checkbox(&mut app.dark, "Tema escuro  (Alt+Shift+D)");
-                ui.checkbox(&mut app.grid, "Grade  (Ctrl+')");
+                let mut grid = app.grid;
+                if ui.checkbox(&mut grid, "Grade  (Ctrl+')").changed() {
+                    app.toggle_grid();
+                }
+                let mut snap = app.snap;
+                if ui
+                    .checkbox(&mut snap, "Encaixar em objetos  (Alt+S)")
+                    .changed()
+                {
+                    app.toggle_snap();
+                }
                 ui.checkbox(&mut app.zen_mode, "Modo zen  (Alt+Z)");
                 let mut view_mode = app.view_mode;
                 if ui
@@ -1031,6 +1041,7 @@ enum Act {
     SelectAll,
     UnlockAll,
     Grid,
+    Snap,
     Zen,
     ViewMode,
     Stats,
@@ -1064,6 +1075,7 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
     let has_text = !app.selected_text().is_empty();
     let toggles = [
         Item("Grade", "Ctrl+'", Act::Grid, Some(app.grid)),
+        Item("Encaixar em objetos", "Alt+S", Act::Snap, Some(app.snap)),
         Item("Modo zen", "Alt+Z", Act::Zen, Some(app.zen_mode)),
         Item(
             "Modo de visualização",
@@ -1171,7 +1183,8 @@ fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
         Act::CopyText => app.copy_text(ctx),
         Act::SelectAll => app.select_all(),
         Act::UnlockAll => app.unlock_all(),
-        Act::Grid => app.grid = !app.grid,
+        Act::Grid => app.toggle_grid(),
+        Act::Snap => app.toggle_snap(),
         Act::Zen => app.zen_mode = !app.zen_mode,
         Act::ViewMode => app.toggle_view_mode(),
         Act::Stats => app.show_stats = !app.show_stats,
@@ -1566,6 +1579,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Rolar a página", "PgUp/PgDn · Shift+PgUp/PgDn"),
                     ("Modo zen", "Alt+Z"),
                     ("Grade", "Ctrl+'"),
+                    ("Encaixar em objetos", "Alt+S"),
                     ("Modo de visualização", "Alt+R"),
                     ("Tema escuro", "Alt+Shift+D"),
                     ("Estatísticas", "Alt+/"),
@@ -1592,6 +1606,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Diminuir / aumentar fonte", "Ctrl+Shift+< / >"),
                     ("Mover 1px / 5px", "Setas / Shift+setas"),
                     ("Seta sem grudar na forma", "Ctrl+arrastar"),
+                    ("Encaixe: inverter enquanto arrasta", "Ctrl+arrastar"),
                     ("Salvar / Salvar como / Abrir", "Ctrl+S / Ctrl+Shift+S / Ctrl+O"),
                     ("Exportar imagem", "Ctrl+Shift+E"),
                     ("Menu de opções", "Botão direito"),
