@@ -73,6 +73,8 @@ No Claude Desktop, em `claude_desktop_config.json`:
 | `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
 | `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
 | `export_image` | Grava PNG ou SVG |
+
+Com o arquivo aberto no editor, as mudanças feitas pelo MCP (ou por qualquer outro programa) aparecem sozinhas. Se o desenho aberto tiver alterações não salvas, o editor pergunta se deve recarregar ou manter o seu; Ctrl+Z desfaz a recarga.
 | `preview` | Devolve um PNG do desenho para o assistente conferir o resultado |
 
 Cada ferramenta recebe o caminho do arquivo em `file` (opcional se um arquivo padrão foi passado na linha de comando), lê, aplica a mudança e grava. Um lote com erro não grava nada. Se o mesmo arquivo estiver aberto no editor, reabra-o para ver as mudanças.
@@ -115,6 +117,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
 | `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |
+| `src/watch.rs` | Percebe quando outro programa altera o arquivo aberto |
 
 As três saídas (tela, PNG e SVG) usam as mesmas primitivas geradas em `geom.rs`, então o que se vê é o que se exporta.
 

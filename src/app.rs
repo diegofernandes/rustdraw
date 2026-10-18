@@ -5,6 +5,7 @@ use crate::export::{self, ExportOpts};
 use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
 use crate::render::{self, Cam, PaintCtx};
+use crate::watch::Watch;
 use egui::{Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Sense, Stroke, StrokeKind};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -12,6 +13,8 @@ use std::path::PathBuf;
 pub const SELECTION: Color32 = Color32::from_rgb(0x69, 0x65, 0xdb);
 const HANDLE_PX: f32 = 7.0;
 const GRID: f32 = 20.0;
+/// De quanto em quanto tempo o arquivo aberto é consultado no disco.
+const WATCH_INTERVAL_MS: u64 = 700;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -115,6 +118,8 @@ pub enum Pending {
     Open,
     /// Limpar o canvas (Ctrl+Delete).
     Clear,
+    /// O arquivo aberto mudou no disco e há alterações não salvas.
+    Reload,
 }
 
 struct Cached {
@@ -150,6 +155,9 @@ pub struct App {
     pub editing: Option<TextEditing>,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
+    /// Acompanha o arquivo aberto, para recarregar quando outro programa o altera.
+    watch: Option<Watch>,
+    last_watch: f64,
     pub dark: bool,
     pub grid: bool,
     pub view_bg: String,
@@ -304,6 +312,8 @@ impl App {
             editing: None,
             file_path: None,
             dirty: false,
+            watch: None,
+            last_watch: 0.0,
             dark: false,
             grid: false,
             view_bg: "#ffffff".into(),
@@ -354,6 +364,16 @@ impl App {
                 .get("rustdrawDirty")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // sem alterações locais, o que estiver no disco vale (recarrega no
+            // primeiro quadro se mudou com o editor fechado)
+            app.watch = app.file_path.as_deref().map(|fp| {
+                let known = if app.dirty {
+                    std::fs::read(fp).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                Watch::new(fp, &known)
+            });
             app.dark = f
                 .app_state
                 .get("theme")
@@ -519,10 +539,11 @@ impl App {
     pub fn load_path(&mut self, p: &std::path::Path) {
         match std::fs::read_to_string(p)
             .map_err(|e| e.to_string())
-            .and_then(|t| SceneFile::parse(&t))
+            .and_then(|t| SceneFile::parse(&t).map(|f| (f, t)))
         {
-            Ok(f) => {
+            Ok((f, t)) => {
                 self.apply_scene(f);
+                self.watch = Some(Watch::new(p, t.as_bytes()));
                 self.file_path = Some(p.to_path_buf());
                 self.dirty = false;
                 self.autosave_pending = true;
@@ -620,7 +641,80 @@ impl App {
             Pending::New => self.new_scene(),
             Pending::Open => self.open_dialog(),
             Pending::Clear => self.clear_canvas(),
+            Pending::Reload => self.reload_from_disk(None),
         }
+    }
+
+    /// Consulta o arquivo aberto e recarrega se outro programa o alterou.
+    ///
+    /// Espera o fim de qualquer interação (arrasto, texto, diálogo) para não
+    /// trocar a cena no meio dela.
+    fn poll_watch(&mut self, ctx: &egui::Context) {
+        if self.watch.is_none() {
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(WATCH_INTERVAL_MS));
+        let busy = !matches!(self.drag, Drag::None)
+            || self.editing.is_some()
+            || self.confirm.is_some()
+            || self.dialog.is_some();
+        if busy || self.now - self.last_watch < WATCH_INTERVAL_MS as f64 / 1000.0 {
+            return;
+        }
+        self.last_watch = self.now;
+        let Some(text) = self.watch.as_mut().and_then(|w| w.poll()) else {
+            return;
+        };
+        if self.dirty {
+            // "Manter o meu" deixa como está; salvar depois sobrescreve
+            self.confirm = Some(Pending::Reload);
+        } else {
+            self.reload_from_disk(Some(text));
+        }
+    }
+
+    /// Troca a cena pelo conteúdo do arquivo no disco (lido agora, se `text` for `None`).
+    ///
+    /// Diferente de abrir: mantém a câmera e a seleção, e entra no histórico,
+    /// então Ctrl+Z volta ao desenho de antes da recarga.
+    pub fn reload_from_disk(&mut self, text: Option<String>) {
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        let Some(text) = text.or_else(|| std::fs::read_to_string(&path).ok()) else {
+            self.toast(format!("Não foi possível ler {}", file_name(&path)));
+            return;
+        };
+        let f = match SceneFile::parse(&text) {
+            Ok(f) => f,
+            // pode ser uma gravação pela metade de um programa que não grava de uma vez
+            Err(_) => {
+                if let Some(w) = &mut self.watch {
+                    w.retry();
+                }
+                return;
+            }
+        };
+        self.watch = Some(Watch::new(&path, text.as_bytes()));
+        self.view_bg = f.view_background().unwrap_or_else(|| "#ffffff".into());
+        self.grid = f.grid_enabled();
+        if f.elements != self.elements {
+            let before = std::mem::replace(&mut self.elements, f.elements);
+            self.undo.push(before);
+            if self.undo.len() > 300 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+            let ids: HashSet<String> = self.elements.iter().map(|e| e.id.clone()).collect();
+            self.selected.retain(|s| ids.contains(s));
+            self.bind_seen.clear();
+            self.bind_hint = None;
+            self.export_preview = None;
+            self.toast(format!("Recarregado: {}", file_name(&path)));
+        }
+        self.dirty = false;
+        self.autosave_pending = true;
+        self.last_change = self.now;
     }
 
     pub fn new_scene(&mut self) {
@@ -631,6 +725,7 @@ impl App {
         let bg = self.view_bg.clone();
         self.apply_scene(SceneFile::new(vec![], &bg, self.grid));
         self.file_path = None;
+        self.watch = None;
         self.dirty = false;
         self.autosave_pending = true;
     }
@@ -673,8 +768,10 @@ impl App {
     }
 
     fn write_to(&mut self, p: &std::path::Path) {
-        match std::fs::write(p, self.scene_file().to_json()) {
+        let json = self.scene_file().to_json();
+        match std::fs::write(p, &json) {
             Ok(()) => {
+                self.watch = Some(Watch::new(p, json.as_bytes()));
                 self.file_path = Some(p.to_path_buf());
                 self.dirty = false;
                 self.autosave_pending = true;
@@ -2729,6 +2826,7 @@ impl App {
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.now = ctx.input(|i| i.time);
         self.poll_dialog();
+        self.poll_watch(ctx);
         let prefs = (self.dark, self.grid, self.view_bg.clone());
         if self.last_prefs.as_ref() != Some(&prefs) {
             if self.last_prefs.is_some() {

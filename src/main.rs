@@ -18,6 +18,7 @@ mod model;
 mod render;
 mod rough;
 mod ui;
+mod watch;
 
 use std::path::PathBuf;
 
