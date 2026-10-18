@@ -214,6 +214,12 @@ impl Element {
                 extra.insert("autoResize".into(), Value::Bool(true));
                 extra.insert("lineHeight".into(), json!(LINE_HEIGHT));
             }
+            "image" => {
+                extra.insert("fileId".into(), Value::Null);
+                extra.insert("status".into(), json!("saved"));
+                extra.insert("scale".into(), json!([1.0, 1.0]));
+                extra.insert("crop".into(), Value::Null);
+            }
             _ => {}
         }
         let roundness = if style.round {
@@ -226,6 +232,7 @@ impl Element {
             None
         };
         let is_text = kind == "text";
+        let is_image = kind == "image";
         Self {
             id: new_id(),
             kind: kind.into(),
@@ -234,8 +241,12 @@ impl Element {
             width: 0.0,
             height: 0.0,
             angle: 0.0,
-            stroke_color: style.stroke_color.clone(),
-            background_color: if is_text || linear && kind == "arrow" {
+            stroke_color: if is_image {
+                "transparent".into()
+            } else {
+                style.stroke_color.clone()
+            },
+            background_color: if is_text || is_image || linear && kind == "arrow" {
                 "transparent".into()
             } else {
                 style.background_color.clone()
@@ -452,6 +463,16 @@ impl SceneFile {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
+    /// Entradas de `files` como mapa (vazio se o arquivo não tiver).
+    pub fn files_map(&self) -> Map<String, Value> {
+        self.files.as_object().cloned().unwrap_or_default()
+    }
+
+    /// Guarda só os arquivos que algum elemento usa.
+    pub fn set_files(&mut self, files: &Map<String, Value>) {
+        self.files = Value::Object(crate::files::subset(files, &self.elements));
+    }
+
     pub fn view_background(&self) -> Option<String> {
         self.app_state
             .get("viewBackgroundColor")
@@ -468,11 +489,11 @@ impl SceneFile {
 }
 
 /// JSON no formato da área de transferência do Excalidraw — cola direto no excalidraw.com.
-pub fn clipboard_json(elements: &[Element]) -> String {
+pub fn clipboard_json(elements: &[Element], files: &Map<String, Value>) -> String {
     serde_json::to_string(&json!({
         "type": "excalidraw/clipboard",
         "elements": elements,
-        "files": {},
+        "files": crate::files::subset(files, elements),
     }))
     .unwrap_or_default()
 }

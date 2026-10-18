@@ -222,6 +222,80 @@ pub enum Prim {
         angle: f32,
         center: P,
     },
+    /// Imagem de `files`. `min`/`max` é a caixa sem rotação; `uv` o recorte
+    /// (0..1) da imagem original, já com o espelhamento aplicado.
+    Image {
+        file_id: String,
+        min: P,
+        max: P,
+        uv: [f32; 4],
+        angle: f32,
+        center: P,
+        opacity: f32,
+    },
+}
+
+/// Recorte (0..1) de um elemento `image`, invertido se a escala for negativa.
+fn image_uv(el: &Element) -> [f32; 4] {
+    let mut uv = [0.0, 0.0, 1.0, 1.0];
+    if let Some(c) = el.extra.get("crop").filter(|c| c.is_object()) {
+        let f = |k: &str| c.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let (nw, nh) = (f("naturalWidth"), f("naturalHeight"));
+        if nw > 0.0 && nh > 0.0 && f("width") > 0.0 && f("height") > 0.0 {
+            uv = [
+                f("x") / nw,
+                f("y") / nh,
+                (f("x") + f("width")) / nw,
+                (f("y") + f("height")) / nh,
+            ];
+        }
+    }
+    let scale = el.extra.get("scale").and_then(|v| v.as_array());
+    let neg = |i: usize| {
+        scale
+            .and_then(|s| s.get(i))
+            .and_then(|v| v.as_f64())
+            .is_some_and(|v| v < 0.0)
+    };
+    if neg(0) {
+        uv.swap(0, 2);
+    }
+    if neg(1) {
+        uv.swap(1, 3);
+    }
+    uv
+}
+
+/// O que desenhar no lugar de uma imagem que não está em `files` (ou não decodifica).
+pub fn image_placeholder(prim: &Prim) -> Vec<Prim> {
+    let Prim::Image {
+        min,
+        max,
+        angle,
+        center,
+        opacity,
+        ..
+    } = prim
+    else {
+        return vec![];
+    };
+    let a = (255.0 * opacity) as u8;
+    let pts: Vec<P> = [*min, P::new(max.x, min.y), *max, P::new(min.x, max.y), *min]
+        .iter()
+        .map(|p| rotate(*p, *center, *angle))
+        .collect();
+    vec![
+        Prim::Fill {
+            pts: pts[..4].to_vec(),
+            color: [233, 236, 239, a],
+        },
+        Prim::Stroke {
+            pts,
+            color: [134, 142, 150, a],
+            width: 1.5,
+            dash: Some((6.0, 4.0)),
+        },
+    ]
 }
 
 fn with_alpha(c: Option<Rgba>, opacity: f32) -> Option<Rgba> {
@@ -305,7 +379,7 @@ pub fn outline(el: &Element) -> Option<Vec<P>> {
             let r = corner_radius(el).min(b.width() / 2.0).min(b.height() / 2.0);
             rounded_rect_outline(&b, r)
         }
-        "rectangle" | "text" => vec![
+        "rectangle" | "text" | "image" => vec![
             b.min,
             P::new(b.max.x, b.min.y),
             b.max,
@@ -524,8 +598,17 @@ pub fn element_prims(el: &Element) -> Vec<Prim> {
                 });
             }
         }
+        "image" => prims.push(Prim::Image {
+            file_id: el.str_field("fileId").unwrap_or_default().to_string(),
+            min: b.min,
+            max: b.max,
+            uv: image_uv(el),
+            angle: el.angle as f32,
+            center: b.center(),
+            opacity,
+        }),
         _ => {
-            // Tipos ainda não suportados (imagem, frame, embed...): moldura tracejada.
+            // Tipos ainda não suportados (frame, embed...): moldura tracejada.
             let pts = [
                 b.min,
                 P::new(b.max.x, b.min.y),
@@ -567,7 +650,7 @@ pub fn element_prims(el: &Element) -> Vec<Prim> {
                         *q = rotate(*q, c, a);
                     }
                 }
-                Prim::Text { .. } => {}
+                Prim::Text { .. } | Prim::Image { .. } => {}
             }
         }
     }
