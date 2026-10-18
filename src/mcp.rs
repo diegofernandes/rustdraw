@@ -9,6 +9,7 @@
 use crate::edit;
 use crate::export::{self, ExportOpts};
 use crate::fonts;
+use crate::frame;
 use crate::model::SceneFile;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
@@ -241,6 +242,10 @@ impl Server {
         if let Some(bg) = scene.view_background() {
             o.view_background = bg;
         }
+        o.frame = args
+            .get("frame")
+            .and_then(|v| v.as_str())
+            .map(|f| frame::find(&scene.elements, f).unwrap_or_else(|| f.to_string()));
         o
     }
 
@@ -270,7 +275,7 @@ impl Server {
     fn preview(&self, args: &Map<String, Value>) -> Result<Value, String> {
         let scene = edit::load(&self.file(args)?)?;
         let mut opts = Self::opts(&scene, args, 1.0);
-        let b = export::bounds_with_text(&scene.elements).ok_or("a cena está vazia")?;
+        let b = export::export_bounds(&scene.elements, &opts).ok_or("nada para mostrar")?;
         let side = (b.width().max(b.height()) + opts.padding * 2.0) * opts.scale;
         if side > PREVIEW_MAX_PX {
             opts.scale *= PREVIEW_MAX_PX / side;
@@ -392,7 +397,8 @@ fn tools() -> Value {
                 "output": {"type": "string", "description": "Caminho de saída .png ou .svg."},
                 "scale": {"type": "number", "description": "Escala do PNG, padrão 2."},
                 "dark": {"type": "boolean", "description": "Modo escuro."},
-                "background": {"type": "boolean", "description": "Com fundo (padrão true)."}
+                "background": {"type": "boolean", "description": "Com fundo (padrão true)."},
+                "frame": {"type": "string", "description": "Exporta só o conteúdo deste frame (nome ou id)."}
             }, "required": ["output"]}
         },
         {
@@ -401,7 +407,8 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
                 "scale": {"type": "number", "description": "Padrão 1 (a imagem é limitada a 1600 px)."},
-                "dark": {"type": "boolean"}
+                "dark": {"type": "boolean"},
+                "frame": {"type": "string", "description": "Mostra só este frame (nome ou id)."}
             }}
         }
     ])

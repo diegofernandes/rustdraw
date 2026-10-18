@@ -2,7 +2,7 @@
 //!
 //! Uso:
 //!   rustdraw [arquivo.excalidraw]
-//!   rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg]
+//!   rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg] [--frame NOME]
 //!   rustdraw mcp [arquivo.excalidraw]
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -12,6 +12,7 @@ mod binding;
 mod edit;
 mod export;
 mod fonts;
+mod frame;
 mod geom;
 mod mcp;
 mod model;
@@ -55,7 +56,7 @@ fn usage() -> ! {
     eprintln!(
         "RustDraw {}\n\n\
          Uso:\n  rustdraw [arquivo.excalidraw]\n  \
-         rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg]\n  \
+         rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg] [--frame NOME]\n  \
          rustdraw mcp [arquivo.excalidraw]   (servidor MCP por stdio)",
         env!("CARGO_PKG_VERSION")
     );
@@ -65,6 +66,7 @@ fn usage() -> ! {
 fn cli_export(args: &[String]) -> Result<(), String> {
     let mut pos = Vec::new();
     let mut opts = export::ExportOpts::default();
+    let mut frame = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -76,6 +78,7 @@ fn cli_export(args: &[String]) -> Result<(), String> {
             }
             "--dark" => opts.dark = true,
             "--no-bg" => opts.background = false,
+            "--frame" => frame = Some(it.next().ok_or("--frame precisa do nome do frame")?.clone()),
             _ => pos.push(a.clone()),
         }
     }
@@ -86,6 +89,11 @@ fn cli_export(args: &[String]) -> Result<(), String> {
     let scene = model::SceneFile::parse(&text)?;
     if let Some(bg) = scene.view_background() {
         opts.view_background = bg;
+    }
+    if let Some(name) = frame {
+        opts.frame = Some(
+            frame::find(&scene.elements, &name).ok_or(format!("frame não encontrado: {name}"))?,
+        );
     }
     if output.to_lowercase().ends_with(".svg") {
         std::fs::write(output, export::render_svg(&scene.elements, &opts)?)

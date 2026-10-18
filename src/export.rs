@@ -1,11 +1,13 @@
 //! Exportação da cena para PNG (tiny-skia + fontdue) e SVG.
 
 use crate::fonts::{self, Family};
-use crate::geom::{Prim, Rgba, element_prims, local_box, scene_bounds};
+use crate::frame;
+use crate::geom::{P, Prim, Rect, Rgba, element_prims, local_box, scene_bounds};
 use crate::model::{Element, dark_filter, parse_color};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash,
+    FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash,
     Transform,
 };
 
@@ -16,6 +18,8 @@ pub struct ExportOpts {
     pub dark: bool,
     pub padding: f32,
     pub view_background: String,
+    /// Exporta só o conteúdo deste frame (id), recortado pela área dele.
+    pub frame: Option<String>,
 }
 
 impl Default for ExportOpts {
@@ -26,6 +30,7 @@ impl Default for ExportOpts {
             dark: false,
             padding: 10.0,
             view_background: "#ffffff".into(),
+            frame: None,
         }
     }
 }
@@ -34,12 +39,122 @@ fn map_color(c: Rgba, dark: bool) -> Rgba {
     if dark { dark_filter(c) } else { c }
 }
 
-pub fn bounds_with_text(els: &[Element]) -> Option<crate::geom::Rect> {
-    let mut r = scene_bounds(els.iter())?;
-    for e in els.iter().filter(|e| e.kind == "text") {
-        r = r.union(local_box(e));
+fn element_bounds(e: &Element) -> Option<Rect> {
+    let r = scene_bounds([e])?;
+    Some(if e.kind == "text" {
+        r.union(local_box(e))
+    } else {
+        r
+    })
+}
+
+/// O que desenhar, em ordem: as primitivas de um elemento e o recorte do
+/// frame dele (`clip` = id do frame).
+struct Item<'a> {
+    id: &'a str,
+    prims: Vec<Prim>,
+    clip: Option<&'a str>,
+}
+
+struct Plan<'a> {
+    bounds: Rect,
+    padding: f32,
+    items: Vec<Item<'a>>,
+    clips: HashMap<&'a str, Rect>,
+}
+
+/// Nome do frame, acima da borda de cima.
+fn frame_name_prim(f: &Element) -> Prim {
+    let r = frame::rect(f);
+    let lh = 1.25;
+    Prim::Text {
+        origin: P::new(r.min.x, r.min.y - frame::NAME_GAP - frame::NAME_SIZE * lh),
+        width: r.width(),
+        text: frame::name(f),
+        size: frame::NAME_SIZE,
+        family: 2,
+        color: frame::NAME_COLOR,
+        align: 0,
+        line_height: lh,
+        angle: 0.0,
+        center: r.center(),
     }
-    Some(r)
+}
+
+/// Monta a exportação: a cena inteira (frames com borda e nome, filhos
+/// recortados) ou, com `opts.frame`, só o conteúdo de um frame, sem margem.
+fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>, String> {
+    let clips = frame::rects(els);
+    if let Some(fid) = &opts.frame {
+        let (&id, &r) = clips
+            .get_key_value(fid.as_str())
+            .ok_or("frame não encontrado")?;
+        let items = els
+            .iter()
+            .filter(|e| e.frame_id.as_deref() == Some(id) && !frame::is_frame(e))
+            .map(|e| Item {
+                id: &e.id,
+                prims: element_prims(e),
+                clip: Some(id),
+            })
+            .collect();
+        return Ok(Plan {
+            bounds: r,
+            padding: 0.0,
+            items,
+            clips,
+        });
+    }
+    let rf = fonts::raster_fonts();
+    let mut bounds: Option<Rect> = None;
+    let mut items = Vec::new();
+    for e in els {
+        let mut prims = element_prims(e);
+        let mut b = element_bounds(e);
+        let clip = e
+            .frame_id
+            .as_deref()
+            .and_then(|f| clips.get_key_value(f))
+            .filter(|_| !frame::is_frame(e));
+        if let Some((_, r)) = clip {
+            b = b.and_then(|b| b.intersect(r));
+        }
+        if frame::is_frame(e) {
+            let name = frame_name_prim(e);
+            if let Prim::Text {
+                origin, text, size, ..
+            } = &name
+            {
+                let w = rf.line_width(Family::Sans, text, *size);
+                let nb = Rect::from_two(*origin, *origin + P::new(w, size * 1.25));
+                b = Some(b.map_or(nb, |b| b.union(nb)));
+            }
+            prims.push(name);
+        }
+        if let Some(b) = b {
+            bounds = Some(bounds.map_or(b, |r| r.union(b)));
+        }
+        items.push(Item {
+            id: &e.id,
+            prims,
+            clip: clip.map(|(k, _)| *k),
+        });
+    }
+    Ok(Plan {
+        bounds: bounds.ok_or("nada para exportar")?,
+        padding: opts.padding,
+        items,
+        clips,
+    })
+}
+
+pub fn bounds_with_text(els: &[Element]) -> Option<Rect> {
+    export_bounds(els, &ExportOpts::default())
+}
+
+/// Área que a exportação ocupa (sem a margem), para a pré-visualização.
+pub fn export_bounds(els: &[Element], opts: &ExportOpts) -> Option<Rect> {
+    plan(els, opts).ok().map(|p| p.bounds)
 }
 
 // ---------------------------------------------------------------------------
@@ -52,9 +167,10 @@ pub fn render_png(els: &[Element], opts: &ExportOpts) -> Result<Vec<u8>, String>
 }
 
 pub fn render_pixmap(els: &[Element], opts: &ExportOpts) -> Result<Pixmap, String> {
-    let b = bounds_with_text(els).ok_or("nada para exportar")?;
+    let plan = plan(els, opts)?;
+    let b = plan.bounds;
     let s = opts.scale.max(0.1);
-    let pad = opts.padding;
+    let pad = plan.padding;
     let w = ((b.width() + pad * 2.0) * s).ceil().max(1.0) as u32;
     let h = ((b.height() + pad * 2.0) * s).ceil().max(1.0) as u32;
     if w > 16384 || h > 16384 {
@@ -67,9 +183,26 @@ pub fn render_pixmap(els: &[Element], opts: &ExportOpts) -> Result<Pixmap, Strin
         pm.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], bg[3]));
     }
     let base = Transform::from_scale(s, s).pre_translate(pad - b.min.x, pad - b.min.y);
-    for el in els {
-        for prim in element_prims(el) {
-            draw_prim(&mut pm, &prim, base, s, opts.dark);
+    let mut masks: HashMap<&str, Mask> = HashMap::new();
+    for item in &plan.items {
+        let mask = match item.clip {
+            Some(f) => {
+                if !masks.contains_key(f) {
+                    let r = plan.clips[f];
+                    let mut m = Mask::new(w, h).ok_or("falha ao criar imagem")?;
+                    if let Some(rect) =
+                        tiny_skia::Rect::from_ltrb(r.min.x, r.min.y, r.max.x, r.max.y)
+                    {
+                        m.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, true, base);
+                    }
+                    masks.insert(f, m);
+                }
+                masks.get(f)
+            }
+            None => None,
+        };
+        for prim in &item.prims {
+            draw_prim(&mut pm, prim, base, s, opts.dark, mask);
         }
     }
     Ok(pm)
@@ -82,7 +215,14 @@ fn paint_for(c: Rgba) -> Paint<'static> {
     p
 }
 
-fn draw_prim(pm: &mut Pixmap, prim: &Prim, base: Transform, s: f32, dark: bool) {
+fn draw_prim(
+    pm: &mut Pixmap,
+    prim: &Prim,
+    base: Transform,
+    s: f32,
+    dark: bool,
+    mask: Option<&Mask>,
+) {
     match prim {
         Prim::Stroke {
             pts,
@@ -111,7 +251,7 @@ fn draw_prim(pm: &mut Pixmap, prim: &Prim, base: Transform, s: f32, dark: bool) 
                 &paint_for(map_color(*color, dark)),
                 &stroke,
                 base,
-                None,
+                mask,
             );
         }
         Prim::Fill { pts, color } => {
@@ -130,7 +270,7 @@ fn draw_prim(pm: &mut Pixmap, prim: &Prim, base: Transform, s: f32, dark: bool) 
                 &paint_for(map_color(*color, dark)),
                 FillRule::Winding,
                 base,
-                None,
+                mask,
             );
         }
         Prim::Text {
@@ -180,7 +320,7 @@ fn draw_prim(pm: &mut Pixmap, prim: &Prim, base: Transform, s: f32, dark: bool) 
                 .pre_translate(-center.x, -center.y)
                 .pre_translate(origin.x, origin.y)
                 .pre_scale(1.0 / s, 1.0 / s);
-            pm.draw_pixmap(0, 0, tmp.as_ref(), &PixmapPaint::default(), t, None);
+            pm.draw_pixmap(0, 0, tmp.as_ref(), &PixmapPaint::default(), t, mask);
         }
     }
 }
@@ -246,8 +386,9 @@ fn path_d(pts: &[crate::geom::P], close: bool) -> String {
 }
 
 pub fn render_svg(els: &[Element], opts: &ExportOpts) -> Result<String, String> {
-    let b = bounds_with_text(els).ok_or("nada para exportar")?;
-    let pad = opts.padding;
+    let plan = plan(els, opts)?;
+    let b = plan.bounds;
+    let pad = plan.padding;
     let w = b.width() + pad * 2.0;
     let h = b.height() + pad * 2.0;
     let mut out = String::new();
@@ -256,9 +397,9 @@ pub fn render_svg(els: &[Element], opts: &ExportOpts) -> Result<String, String> 
         r#"<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.2} {h:.2}">"#
     );
     let _ = writeln!(out, "  <!-- svg-source:rustdraw -->");
-    let uses_hand = els
-        .iter()
-        .any(|e| e.kind == "text" && Family::from_excalidraw(e.font_family()) == Family::Hand);
+    let uses_hand = plan.items.iter().flat_map(|i| &i.prims).any(
+        |p| matches!(p, Prim::Text { family, .. } if Family::from_excalidraw(*family) == Family::Hand),
+    );
     if uses_hand {
         let _ = writeln!(
             out,
@@ -281,9 +422,29 @@ pub fn render_svg(els: &[Element], opts: &ExportOpts) -> Result<String, String> 
         pad - b.min.y
     );
     let rf = fonts::raster_fonts();
-    for el in els {
-        let _ = writeln!(out, "    <g data-id=\"{}\">", esc(&el.id));
-        for prim in element_prims(el) {
+    let mut clip_ids: HashMap<&str, usize> = HashMap::new();
+    for item in &plan.items {
+        let clip = match item.clip {
+            Some(f) => {
+                let n = clip_ids.len();
+                let n = *clip_ids.entry(f).or_insert_with(|| {
+                    let r = plan.clips[f];
+                    let _ = writeln!(
+                        out,
+                        r#"    <clipPath id="frame-clip-{n}"><rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}"/></clipPath>"#,
+                        r.min.x,
+                        r.min.y,
+                        r.width(),
+                        r.height()
+                    );
+                    n
+                });
+                format!(r#" clip-path="url(#frame-clip-{n})""#)
+            }
+            None => String::new(),
+        };
+        let _ = writeln!(out, "    <g data-id=\"{}\"{clip}>", esc(item.id));
+        for prim in item.prims.iter().cloned() {
             match prim {
                 Prim::Stroke {
                     pts,
@@ -376,6 +537,62 @@ mod tests {
         t.width = 60.0;
         t.height = 50.0;
         vec![r, t]
+    }
+
+    /// Frame 100×80 em (0, 0) com um retângulo que passa da borda e outro fora.
+    fn framed() -> Vec<Element> {
+        let s = Style::default();
+        let mut f = Element::new("frame", 0.0, 0.0, &s);
+        f.width = 100.0;
+        f.height = 80.0;
+        f.set_field("name", serde_json::json!("Tela 1"));
+        let mut child = Element::new("rectangle", 50.0, 40.0, &s);
+        child.width = 200.0;
+        child.height = 200.0;
+        child.background_color = "#e03131".into();
+        child.frame_id = Some(f.id.clone());
+        let mut out = Element::new("rectangle", 400.0, 0.0, &s);
+        out.width = 50.0;
+        out.height = 50.0;
+        vec![child, out, f]
+    }
+
+    #[test]
+    fn single_frame_export_is_clipped_to_the_frame() {
+        let els = framed();
+        let opts = ExportOpts {
+            scale: 1.0,
+            background: false,
+            frame: Some(els[2].id.clone()),
+            ..Default::default()
+        };
+        let pm = render_pixmap(&els, &opts).unwrap();
+        assert_eq!((pm.width(), pm.height()), (100, 80));
+        // o filho aparece (vermelho) no canto de baixo à direita; fora dele, nada
+        let px = |x, y| pm.pixel(x, y).unwrap();
+        assert!(px(90, 70).red() > 200 && px(90, 70).alpha() == 255);
+        assert_eq!(px(10, 10).alpha(), 0);
+        let svg = render_svg(&els, &opts).unwrap();
+        assert!(svg.contains("clipPath") && svg.contains(&els[0].id));
+        assert!(!svg.contains(&els[1].id), "fora do frame não entra");
+        assert!(!svg.contains("Tela 1"), "sem a borda e o nome do frame");
+
+        let missing = ExportOpts {
+            frame: Some("nada".into()),
+            ..Default::default()
+        };
+        assert!(render_png(&els, &missing).is_err());
+    }
+
+    #[test]
+    fn full_export_shows_frame_names_and_clips_children() {
+        let els = framed();
+        let b = export_bounds(&els, &ExportOpts::default()).unwrap();
+        assert!(b.min.y < -10.0, "o nome fica acima do frame");
+        assert!(b.max.y < 100.0, "o filho é cortado na borda do frame");
+        let svg = render_svg(&els, &ExportOpts::default()).unwrap();
+        assert!(svg.contains("Tela 1") && svg.contains("clip-path"));
+        assert_eq!(crate::frame::find(&els, "Tela 1"), Some(els[2].id.clone()));
     }
 
     #[test]
