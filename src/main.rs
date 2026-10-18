@@ -17,6 +17,7 @@ mod mcp;
 mod model;
 mod render;
 mod rough;
+mod snap;
 mod ui;
 
 use std::path::PathBuf;
