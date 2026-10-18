@@ -4,7 +4,8 @@ use crate::fonts::Family;
 use crate::geom::{P, Prim, Rgba, rotate};
 use crate::model::dark_filter;
 use egui::epaint::TextShape;
-use egui::{Color32, FontFamily, FontId, Painter, Pos2, Shape, Stroke};
+use egui::{Color32, FontFamily, FontId, Painter, Pos2, Shape, Stroke, TextureHandle};
+use std::collections::HashMap;
 
 /// Câmera: `tela = origem + (mundo + scroll) * zoom`.
 #[derive(Clone, Copy, Debug)]
@@ -83,6 +84,8 @@ pub struct PaintCtx<'a> {
     pub dark: bool,
     pub alpha: f32,
     pub hand_ok: bool,
+    /// Texturas das imagens já carregadas, por `fileId`.
+    pub images: &'a HashMap<String, TextureHandle>,
 }
 
 pub fn paint_prims(pc: &PaintCtx, prims: &[Prim]) {
@@ -135,6 +138,39 @@ pub fn paint_prims(pc: &PaintCtx, prims: &[Prim]) {
                         }
                     }
                 }
+            }
+            Prim::Image {
+                file_id,
+                min,
+                max,
+                uv,
+                angle,
+                center,
+                opacity,
+            } => {
+                let Some(tex) = pc.images.get(file_id) else {
+                    paint_prims(pc, &crate::geom::image_placeholder(prim));
+                    continue;
+                };
+                let a = (opacity * pc.alpha * 255.0).round() as u8;
+                let mut mesh = egui::Mesh::with_texture(tex.id());
+                let corners = [*min, P::new(max.x, min.y), *max, P::new(min.x, max.y)];
+                let uvs = [
+                    (uv[0], uv[1]),
+                    (uv[2], uv[1]),
+                    (uv[2], uv[3]),
+                    (uv[0], uv[3]),
+                ];
+                for (p, (u, v)) in corners.iter().zip(uvs) {
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: pc.cam.s(rotate(*p, *center, *angle)),
+                        uv: Pos2::new(u, v),
+                        color: Color32::from_white_alpha(a),
+                    });
+                }
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(0, 2, 3);
+                pc.painter.add(Shape::mesh(mesh));
             }
             Prim::Text {
                 origin,

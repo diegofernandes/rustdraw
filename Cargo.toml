@@ -12,6 +12,7 @@ eframe = { version = "0.37", default-features = false, features = ["clipboard", 
 egui = "0.37"
 epaint_default_fonts = "0.37.0"
 fontdue = "0.9.4"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 pollster = "0.4.0"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

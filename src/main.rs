@@ -11,6 +11,7 @@ mod app;
 mod binding;
 mod edit;
 mod export;
+mod files;
 mod fonts;
 mod geom;
 mod mcp;
@@ -87,6 +88,7 @@ fn cli_export(args: &[String]) -> Result<(), String> {
     if let Some(bg) = scene.view_background() {
         opts.view_background = bg;
     }
+    opts.files = scene.files_map();
     if output.to_lowercase().ends_with(".svg") {
         std::fs::write(output, export::render_svg(&scene.elements, &opts)?)
             .map_err(|e| e.to_string())?;
