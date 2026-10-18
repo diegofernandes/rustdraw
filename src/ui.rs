@@ -1616,6 +1616,34 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
             });
         return;
     }
+    if pending == Pending::Reload {
+        let name = app
+            .file_path
+            .as_deref()
+            .map(crate::app::file_name)
+            .unwrap_or_default();
+        egui::Window::new("Arquivo alterado")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Outro programa alterou {name}, mas o desenho aberto tem alterações não salvas."
+                ));
+                ui.label("Recarregar troca o desenho pelo do arquivo (Ctrl+Z volta ao seu).");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Recarregar").clicked() {
+                        app.confirm = None;
+                        app.reload_from_disk(None);
+                    }
+                    if ui.button("Manter o meu").clicked() {
+                        app.confirm = None;
+                    }
+                });
+            });
+        return;
+    }
     egui::Window::new("Alterações não salvas")
         .collapsible(false)
         .resizable(false)
