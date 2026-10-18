@@ -99,7 +99,7 @@ fn image_pixmap(files: &Map<String, Value>, id: &str) -> Option<Pixmap> {
     let img = crate::files::decode(files, id)?;
     let size = tiny_skia::IntSize::from_wh(img.width(), img.height())?;
     let mut data = img.into_raw();
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         let a = px[3] as u32;
         for c in &mut px[..3] {
             *c = (*c as u32 * a / 255) as u8;
