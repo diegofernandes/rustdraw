@@ -34,7 +34,7 @@ fn map_color(c: Rgba, dark: bool) -> Rgba {
     if dark { dark_filter(c) } else { c }
 }
 
-fn bounds_with_text(els: &[Element]) -> Option<crate::geom::Rect> {
+pub fn bounds_with_text(els: &[Element]) -> Option<crate::geom::Rect> {
     let mut r = scene_bounds(els.iter())?;
     for e in els.iter().filter(|e| e.kind == "text") {
         r = r.union(local_box(e));

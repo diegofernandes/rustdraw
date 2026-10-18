@@ -3,14 +3,17 @@
 //! Uso:
 //!   rustdraw [arquivo.excalidraw]
 //!   rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg]
+//!   rustdraw mcp [arquivo.excalidraw]
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod binding;
+mod edit;
 mod export;
 mod fonts;
 mod geom;
+mod mcp;
 mod model;
 mod render;
 mod rough;
@@ -52,7 +55,8 @@ fn usage() -> ! {
     eprintln!(
         "RustDraw {}\n\n\
          Uso:\n  rustdraw [arquivo.excalidraw]\n  \
-         rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg]",
+         rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg]\n  \
+         rustdraw mcp [arquivo.excalidraw]   (servidor MCP por stdio)",
         env!("CARGO_PKG_VERSION")
     );
     std::process::exit(2)
@@ -104,6 +108,13 @@ fn main() -> eframe::Result {
         }
         Some("export") => {
             if let Err(e) = cli_export(&args[1..]) {
+                eprintln!("erro: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some("mcp") => {
+            if let Err(e) = mcp::run(args.get(1).map(PathBuf::from)) {
                 eprintln!("erro: {e}");
                 std::process::exit(1);
             }
