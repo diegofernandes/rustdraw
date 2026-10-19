@@ -146,6 +146,14 @@ Ainda não há texto dentro de contêiner. Elementos desse tipo vindos do Excali
 
 ## Créditos
 
-- Inspirado no [Excalidraw](https://github.com/excalidraw/excalidraw) (MIT) e no [rough.js](https://github.com/rough-stuff/rough) (MIT)
+- Inspirado no [Excalidraw](https://github.com/excalidraw/excalidraw) (MIT) e no [rough.js](https://github.com/rough-stuff/rough) (MIT); os avisos de copyright estão em [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
 - Fonte **Virgil** © Ellinor Rapp, sob a SIL Open Font License 1.1 — ver [`assets/fonts/Virgil-LICENSE.md`](assets/fonts/Virgil-LICENSE.md). Distribuída sem modificações (WOFF2 original)
 - Interface com [egui/eframe](https://github.com/emilk/egui)
+
+O RustDraw é um projeto independente, sem vínculo com o Excalidraw nem endossado por ele. "Excalidraw" é citado só para descrever a compatibilidade com o formato e o estilo.
+
+## Licença
+
+Distribuído sob a licença MIT ou a Apache 2.0, à sua escolha: [`LICENSE-MIT`](LICENSE-MIT) e [`LICENSE-APACHE`](LICENSE-APACHE). Contribuições enviadas para o projeto ficam sob essas mesmas duas licenças, salvo indicação em contrário.
+
+Os pacotes de release trazem também `THIRD_PARTY_NOTICES.md` e `THIRD_PARTY_LICENSES.html`, com as licenças de todas as bibliotecas e fontes embutidas no executável.
