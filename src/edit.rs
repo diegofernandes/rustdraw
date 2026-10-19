@@ -749,6 +749,8 @@ pub fn delete(els: &mut Vec<Element>, ids: &[String]) -> Result<usize, String> {
             }
         }
     }
+    // filhos de um frame apagado ficam soltos
+    crate::frame::tidy(els);
     finish(els, &HashSet::new());
     Ok(removed)
 }

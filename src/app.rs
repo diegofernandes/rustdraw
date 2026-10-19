@@ -3,6 +3,7 @@
 use crate::binding::{self, Binding, Candidate};
 use crate::export::{self, ExportOpts};
 use crate::files;
+use crate::frame;
 use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::library::{self, LibraryItem};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
@@ -32,6 +33,7 @@ pub enum Tool {
     Draw,
     Text,
     Eraser,
+    Frame,
 }
 
 impl Tool {
@@ -44,6 +46,7 @@ impl Tool {
             Tool::Line => "line",
             Tool::Draw => "freedraw",
             Tool::Text => "text",
+            Tool::Frame => "frame",
             _ => return None,
         })
     }
@@ -116,6 +119,14 @@ pub struct TextEditing {
     pub focus: bool,
     /// Centro fixo para texto centralizado (criado com duplo clique numa forma).
     pub anchor_center: Option<f64>,
+}
+
+/// Nome de frame em edição (duplo clique no nome, ou Enter com o frame selecionado).
+pub struct FrameRename {
+    pub id: String,
+    pub buf: String,
+    pub before: Vec<Element>,
+    pub focus: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,6 +230,11 @@ pub struct App {
     bind_seen: HashMap<String, Vec<i64>>,
     /// Modificadores do último quadro (Ctrl/Cmd desliga a ligação de setas).
     mods: Modifiers,
+    /// Onde o nome de cada frame foi desenhado (tela), para clicar nele.
+    pub frame_labels: Vec<(String, egui::Rect)>,
+    pub renaming: Option<FrameRename>,
+    /// Frame onde os elementos arrastados vão entrar, para destacar.
+    frame_hint: Option<String>,
     /// Biblioteca pessoal (itens mais recentes primeiro).
     pub library: Vec<LibraryItem>,
     pub show_library: bool,
@@ -387,6 +403,9 @@ impl App {
             bind_hint: None,
             bind_seen: HashMap::new(),
             mods: Modifiers::NONE,
+            frame_labels: vec![],
+            renaming: None,
+            frame_hint: None,
             library: library::path()
                 .filter(|p| p.exists())
                 .and_then(|p| library::load(&p).ok())
@@ -460,6 +479,7 @@ impl App {
     pub fn commit(&mut self, before: Vec<Element>) {
         self.sync_bindings();
         binding::tidy(&mut self.elements);
+        frame::tidy(&mut self.elements);
         if before == self.elements {
             return;
         }
@@ -560,6 +580,7 @@ impl App {
         let ids: HashSet<String> = self.elements.iter().map(|e| e.id.clone()).collect();
         self.selected.retain(|s| ids.contains(s));
         self.drag = Drag::None;
+        self.renaming = None;
         self.mark_changed();
     }
 
@@ -584,6 +605,7 @@ impl App {
         self.cache.clear();
         self.drag = Drag::None;
         self.editing = None;
+        self.renaming = None;
         self.export_preview = None;
         self.cam.zoom = 1.0;
         self.cam.scroll = P::new(0.0, 0.0);
@@ -745,7 +767,7 @@ impl App {
 
     /// "Adicionar à biblioteca": a seleção (com os grupos) vira um item.
     pub fn add_selection_to_library(&mut self) {
-        let els: Vec<Element> = self.selected_elements().into_iter().cloned().collect();
+        let els = self.selection_with_children();
         if els.is_empty() {
             return;
         }
@@ -832,7 +854,8 @@ impl App {
         self.finish_editing();
         self.finish_linear();
         let before = self.elements.clone();
-        let copies = Self::clone_with_new_ids(&els, at - b.center());
+        let mut copies = Self::clone_with_new_ids(&els, at - b.center());
+        self.adopt_into_frame(&mut copies, at);
         self.selected = copies.iter().map(|e| e.id.clone()).collect();
         self.elements.extend(copies);
         self.tool = Tool::Select;
@@ -1026,30 +1049,106 @@ impl App {
         let mut opts = self.export_opts.clone();
         opts.view_background = self.view_bg.clone();
         opts.files = files::subset(&self.files, els);
+        opts.frame = None;
         opts
     }
 
-    pub fn export_elements(&self) -> Vec<Element> {
-        if self.export_selection_only && !self.selected.is_empty() {
-            self.selected_elements().into_iter().cloned().collect()
-        } else {
+    /// O frame selecionado, quando a seleção é um frame só (com ou sem os filhos).
+    pub fn selected_frame(&self) -> Option<&Element> {
+        let mut frames = self
+            .selected_elements()
+            .into_iter()
+            .filter(|e| frame::is_frame(e));
+        let f = frames.next()?;
+        let only = frames.next().is_none()
+            && self
+                .selected_elements()
+                .iter()
+                .all(|e| frame::is_frame(e) || e.frame_id.as_deref() == Some(f.id.as_str()));
+        only.then_some(f)
+    }
+
+    /// Elementos e opções da exportação: com "Somente a seleção" e um frame
+    /// selecionado, exporta só o conteúdo dele, recortado pela área do frame.
+    pub fn export_job(&self) -> (Vec<Element>, ExportOpts) {
+        let frame = self.selected_frame().map(|f| f.id.clone());
+        let els = if !self.export_selection_only || self.selected.is_empty() || frame.is_some() {
             self.elements.clone()
+        } else {
+            self.selection_with_children()
+        };
+        let mut opts = self.export_opts_for(&els);
+        if self.export_selection_only && !self.selected.is_empty() {
+            opts.frame = frame;
+        }
+        (els, opts)
+    }
+
+    /// Elementos colados ou inseridos em `at`: o que não veio com o próprio
+    /// frame entra no frame onde foi solto (ou fica fora de frames).
+    fn adopt_into_frame(&self, copies: &mut [Element], at: P) {
+        let pasted: HashSet<String> = copies.iter().map(|e| e.id.clone()).collect();
+        let target = frame::frame_at(&self.elements, at, &HashSet::new())
+            .map(|i| self.elements[i].id.clone());
+        for e in copies.iter_mut().filter(|e| !frame::is_frame(e)) {
+            if !e.frame_id.as_ref().is_some_and(|f| pasted.contains(f)) {
+                e.frame_id = target.clone();
+            }
+        }
+    }
+
+    /// Seleção mais os filhos dos frames selecionados, na ordem do desenho.
+    fn selection_with_children(&self) -> Vec<Element> {
+        let ids = frame::with_children(&self.elements, &self.selected);
+        self.elements
+            .iter()
+            .filter(|e| ids.contains(&e.id))
+            .cloned()
+            .collect()
+    }
+
+    /// Como `export_job`, para copiar a seleção (ou tudo) como imagem.
+    fn copy_job(&self) -> (Vec<Element>, ExportOpts) {
+        let frame = self.selected_frame().map(|f| f.id.clone());
+        let els = if self.selected.is_empty() || frame.is_some() {
+            self.elements.clone()
+        } else {
+            self.selection_with_children()
+        };
+        let mut opts = self.export_opts_for(&els);
+        opts.frame = frame;
+        (els, opts)
+    }
+
+    /// "Exportar frame…" do menu de contexto: abre a exportação só com o frame.
+    pub fn export_selected_frame(&mut self) {
+        if self.selected_frame().is_some() {
+            self.export_selection_only = true;
+            self.show_export = true;
+            self.export_preview = None;
         }
     }
 
     pub fn export_file(&mut self, svg: bool) {
-        let els = self.export_elements();
-        if els.is_empty() {
+        let (els, opts) = self.export_job();
+        if export::export_bounds(&els, &opts).is_none() {
             self.toast("Nada para exportar");
             return;
         }
-        let opts = self.export_opts_for(&els);
-        let base = self
-            .file_path
-            .as_deref()
-            .and_then(|p| p.file_stem())
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "desenho".into());
+        let base = match &opts.frame {
+            Some(id) => self
+                .elements
+                .iter()
+                .find(|e| &e.id == id)
+                .map(frame::name)
+                .unwrap_or_default(),
+            None => self
+                .file_path
+                .as_deref()
+                .and_then(|p| p.file_stem())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "desenho".into()),
+        };
         let (ext, label) = if svg { ("svg", "SVG") } else { ("png", "PNG") };
         let fut = rfd::AsyncFileDialog::new()
             .set_title(format!("Exportar {label}"))
@@ -1068,25 +1167,20 @@ impl App {
     }
 
     pub fn copy_svg(&mut self, ctx: &egui::Context) {
-        let els = self.export_elements();
-        self.copy_svg_of(ctx, &els);
+        let (els, opts) = self.export_job();
+        self.copy_svg_of(ctx, &els, &opts);
     }
 
     /// Copia a seleção (ou tudo) como SVG — "Copiar como SVG" do menu de contexto.
     pub fn copy_selection_svg(&mut self, ctx: &egui::Context) {
-        let els: Vec<Element> = if self.selected.is_empty() {
-            self.elements.clone()
-        } else {
-            self.selected_elements().into_iter().cloned().collect()
-        };
+        let (els, opts) = self.copy_job();
         if !els.is_empty() {
-            self.copy_svg_of(ctx, &els);
+            self.copy_svg_of(ctx, &els, &opts);
         }
     }
 
-    fn copy_svg_of(&mut self, ctx: &egui::Context, els: &[Element]) {
-        let opts = self.export_opts_for(els);
-        match export::render_svg(els, &opts) {
+    fn copy_svg_of(&mut self, ctx: &egui::Context, els: &[Element], opts: &ExportOpts) {
+        match export::render_svg(els, opts) {
             Ok(s) => {
                 ctx.copy_text(s);
                 self.toast("SVG copiado para a área de transferência");
@@ -1101,6 +1195,7 @@ impl App {
 
     pub fn set_tool(&mut self, t: Tool) {
         self.finish_editing();
+        self.finish_rename();
         self.finish_linear();
         if t != self.tool {
             self.prev_tool = self.tool;
@@ -1116,7 +1211,9 @@ impl App {
             return;
         }
         let before = self.elements.clone();
-        self.elements.retain(|e| !self.selected.contains(&e.id));
+        // apagar um frame apaga o que está dentro dele (como no Excalidraw)
+        let gone = frame::with_children(&self.elements, &self.selected);
+        self.elements.retain(|e| !gone.contains(&e.id));
         self.selected.clear();
         self.commit(before);
     }
@@ -1144,6 +1241,10 @@ impl App {
                     .map(|g| groups.entry(g.clone()).or_insert_with(new_id).clone())
                     .collect();
                 n.bound_elements = None;
+                // filhos acompanham o frame copiado; senão, ficam no frame de antes
+                if let Some(new) = e.frame_id.as_ref().and_then(|f| ids.get(f.as_str())) {
+                    n.frame_id = Some(new.clone());
+                }
                 if n.extra.contains_key("containerId") {
                     n.extra
                         .insert("containerId".into(), serde_json::Value::Null);
@@ -1173,7 +1274,7 @@ impl App {
             return;
         }
         let before = self.elements.clone();
-        let src: Vec<Element> = self.selected_elements().into_iter().cloned().collect();
+        let src = self.selection_with_children();
         let copies = Self::clone_with_new_ids(&src, P::new(10.0, 10.0));
         self.selected = copies.iter().map(|e| e.id.clone()).collect();
         self.elements.extend(copies);
@@ -1181,7 +1282,7 @@ impl App {
     }
 
     pub fn copy_selection(&self, ctx: &egui::Context) {
-        let sel: Vec<Element> = self.selected_elements().into_iter().cloned().collect();
+        let sel = self.selection_with_children();
         if !sel.is_empty() {
             ctx.copy_text(clipboard_json(&sel, &self.files));
         }
@@ -1203,7 +1304,8 @@ impl App {
             }
             let b = geom::scene_bounds(f.elements.iter()).unwrap();
             let off = at - b.center();
-            let copies = Self::clone_with_new_ids(&f.elements, off);
+            let mut copies = Self::clone_with_new_ids(&f.elements, off);
+            self.adopt_into_frame(&mut copies, at);
             self.selected = copies.iter().map(|e| e.id.clone()).collect();
             self.elements.extend(copies);
         } else if !text.trim().is_empty() {
@@ -1216,6 +1318,8 @@ impl App {
             el.width = longest as f64 * el.font_size() * 0.55;
             el.height = lines.len() as f64 * el.font_size() * el.line_height();
             self.needs_measure.insert(el.id.clone());
+            el.frame_id = frame::frame_at(&self.elements, at, &HashSet::new())
+                .map(|i| self.elements[i].id.clone());
             self.selected = [el.id.clone()].into();
             self.elements.push(el);
         } else {
@@ -1266,6 +1370,8 @@ impl App {
         let max_side = ((view.height() * 0.5).max(160.0) / self.cam.zoom) as f64;
         let mut el = files::image_element(&added, at.x as f64, at.y as f64, max_side);
         el.opacity = self.style.opacity;
+        el.frame_id = frame::frame_at(&self.elements, at, &HashSet::new())
+            .map(|i| self.elements[i].id.clone());
         let before = self.elements.clone();
         self.bad_images.remove(&added.id);
         self.selected = [el.id.clone()].into();
@@ -1475,9 +1581,12 @@ impl App {
                 && self
                     .selection_bounds()
                     .is_some_and(|b| b.expand(4.0 / self.cam.zoom).contains(p));
+            let label = self
+                .frame_label_at(screen)
+                .and_then(|id| self.elements.iter().position(|e| e.id == id));
             if in_sel_box {
                 on_element = true;
-            } else if let Some(i) = self.element_at(p) {
+            } else if let Some(i) = label.or_else(|| self.element_at(p)) {
                 if !self.selected.contains(&self.elements[i].id) {
                     if self.tool != Tool::Select {
                         self.set_tool(Tool::Select);
@@ -1520,7 +1629,7 @@ impl App {
             return;
         };
         let before = self.elements.clone();
-        let sel = self.selected.clone();
+        let sel = frame::with_children(&self.elements, &self.selected);
         let mid = if horizontal {
             (b.min.x + b.max.x) as f64
         } else {
@@ -1680,7 +1789,11 @@ impl App {
         }
         let before = self.elements.clone();
         let sel = self.selected.clone();
-        for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
+        for e in self
+            .elements
+            .iter_mut()
+            .filter(|e| sel.contains(&e.id) && !frame::is_frame(e))
+        {
             if e.kind == "image" {
                 e.opacity = src.opacity;
                 e.touch();
@@ -1721,15 +1834,10 @@ impl App {
 
     /// Shift+Alt+C: copia a seleção (ou tudo) como imagem PNG.
     pub fn copy_png(&mut self, ctx: &egui::Context) {
-        let els: Vec<Element> = if self.selected.is_empty() {
-            self.elements.clone()
-        } else {
-            self.selected_elements().into_iter().cloned().collect()
-        };
+        let (els, opts) = self.copy_job();
         if els.is_empty() {
             return;
         }
-        let opts = self.export_opts_for(&els);
         match export::render_pixmap(&els, &opts) {
             Ok(pm) => {
                 let size = [pm.width() as usize, pm.height() as usize];
@@ -1789,6 +1897,8 @@ impl App {
         el.height = el.font_size() * el.line_height();
         el.y -= el.height / 2.0;
         el.width = 1.0;
+        el.frame_id = frame::frame_at(&self.elements, at, &HashSet::new())
+            .map(|i| self.elements[i].id.clone());
         let id = el.id.clone();
         self.elements.push(el);
         self.selected = [id.clone()].into();
@@ -1828,6 +1938,55 @@ impl App {
         if !self.tool_locked && self.tool == Tool::Text {
             self.tool = Tool::Select;
         }
+    }
+
+    /// Começa a editar o nome do frame `id`.
+    pub fn rename_frame(&mut self, id: &str) {
+        self.finish_editing();
+        let Some(f) = self
+            .elements
+            .iter()
+            .find(|e| e.id == id && frame::is_frame(e))
+        else {
+            return;
+        };
+        self.renaming = Some(FrameRename {
+            id: id.to_string(),
+            buf: frame::name(f),
+            before: self.elements.clone(),
+            focus: true,
+        });
+        self.selected = [id.to_string()].into();
+        self.drag = Drag::None;
+    }
+
+    /// Grava o nome em edição (vazio volta a ser `null`, que aparece como "Frame").
+    pub fn finish_rename(&mut self) {
+        let Some(r) = self.renaming.take() else {
+            return;
+        };
+        let name = r.buf.trim().to_string();
+        if let Some(f) = self.get_mut(&r.id) {
+            let v = if name.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(name)
+            };
+            if f.extra.get("name") != Some(&v) {
+                f.set_field("name", v);
+                f.touch();
+            }
+        }
+        self.commit(r.before);
+    }
+
+    /// Frame cujo nome (desenhado no último quadro) está em `screen`.
+    fn frame_label_at(&self, screen: Pos2) -> Option<String> {
+        self.frame_labels
+            .iter()
+            .rev()
+            .find(|(_, r)| r.expand(2.0).contains(screen))
+            .map(|(id, _)| id.clone())
     }
 
     /// Atualiza o elemento com o texto em edição e re-mede.
@@ -1979,9 +2138,10 @@ impl App {
 
     fn element_at(&self, p: P) -> Option<usize> {
         let tol = 8.0 / self.cam.zoom;
-        (0..self.elements.len())
-            .rev()
-            .find(|&i| geom::hit_test(&self.elements[i], p, tol))
+        (0..self.elements.len()).rev().find(|&i| {
+            let e = &self.elements[i];
+            geom::hit_test(e, p, tol) && frame::visible_at(&self.elements, e, p)
+        })
     }
 
     fn group_of(&self, i: usize) -> HashSet<String> {
@@ -2074,7 +2234,9 @@ impl App {
                 (Handle::W, P::new(x0, my)),
             ]);
         }
-        v.push((Handle::Rotate, P::new(mx, y0 - 22.0 / z)));
+        if !frame::is_frame(el) {
+            v.push((Handle::Rotate, P::new(mx, y0 - 22.0 / z)));
+        }
         v.into_iter().map(|(h, p)| (h, rotate(p, c, a))).collect()
     }
 
@@ -2163,6 +2325,9 @@ impl App {
             self.drag = Drag::Pan { last: pos };
         }
 
+        if over && pressed && self.renaming.is_some() {
+            self.finish_rename();
+        }
         if over && pressed {
             if self.editing.is_some() {
                 self.finish_editing();
@@ -2177,7 +2342,10 @@ impl App {
             }
         }
         if over && dbl && self.tool == Tool::Select && self.editing.is_none() && !self.view_mode {
-            self.on_double_click(wp);
+            match self.frame_label_at(pos) {
+                Some(id) => self.rename_frame(&id),
+                None => self.on_double_click(wp),
+            }
         }
         if over && dbl && matches!(self.drag, Drag::LinearMulti { .. }) {
             self.finish_linear();
@@ -2205,6 +2373,7 @@ impl App {
             (_, Tool::Hand) => CursorIcon::Grab,
             _ if space || self.view_mode => CursorIcon::Grab,
             (Drag::Move { .. }, _) => CursorIcon::Move,
+            (_, Tool::Select) if over && self.frame_label_at(pos).is_some() => CursorIcon::Move,
             (_, Tool::Select) if over => match self.handle_at(pos) {
                 Some(Handle::N | Handle::S) => CursorIcon::ResizeVertical,
                 Some(Handle::E | Handle::W) => CursorIcon::ResizeHorizontal,
@@ -2248,7 +2417,11 @@ impl App {
                     && self
                         .selection_bounds()
                         .is_some_and(|b| b.expand(4.0 / self.cam.zoom).contains(p));
-                let hit = self.element_at(p);
+                // o nome do frame seleciona o frame
+                let label = self
+                    .frame_label_at(screen)
+                    .and_then(|id| self.elements.iter().position(|e| e.id == id));
+                let hit = label.or_else(|| self.element_at(p));
                 match hit {
                     Some(i) if !in_sel_box || mods.shift => {
                         let group = self.group_of(i);
@@ -2283,15 +2456,29 @@ impl App {
                 }
                 // começa a mover (Alt = duplicar e mover a cópia)
                 if mods.alt {
-                    let src: Vec<Element> = self.selected_elements().into_iter().cloned().collect();
+                    let src = self.selection_with_children();
                     let copies = Self::clone_with_new_ids(&src, P::new(0.0, 0.0));
-                    self.selected = copies.iter().map(|e| e.id.clone()).collect();
+                    let copied: HashSet<String> = copies.iter().map(|e| e.id.clone()).collect();
                     self.elements.extend(copies);
+                    // seleciona as cópias (sem os filhos de frames copiados)
+                    self.selected = copied
+                        .iter()
+                        .filter(|id| {
+                            self.elements
+                                .iter()
+                                .find(|e| &e.id == *id)
+                                .and_then(|e| e.frame_id.as_ref())
+                                .is_none_or(|f| !copied.contains(f))
+                        })
+                        .cloned()
+                        .collect();
                 }
+                // os filhos andam com o frame
+                let moving = frame::with_children(&self.elements, &self.selected);
                 let originals = self
                     .elements
                     .iter()
-                    .filter(|e| self.selected.contains(&e.id) && !e.locked)
+                    .filter(|e| moving.contains(&e.id) && !e.locked)
                     .map(|e| (e.id.clone(), e.x, e.y))
                     .collect();
                 let bounds = Rect::from_points(
@@ -2313,7 +2500,7 @@ impl App {
                     moved: false,
                 };
             }
-            Tool::Rect | Tool::Diamond | Tool::Ellipse | Tool::Arrow | Tool::Line => {
+            Tool::Rect | Tool::Diamond | Tool::Ellipse | Tool::Arrow | Tool::Line | Tool::Frame => {
                 if let Drag::LinearMulti { id, .. } = &self.drag {
                     // adiciona um ponto
                     let id = id.clone();
@@ -2332,6 +2519,10 @@ impl App {
                 let origin = P::new(snap(p.x, g), snap(p.y, g));
                 let kind = self.tool.kind().unwrap();
                 let mut el = Element::new(kind, origin.x as f64, origin.y as f64, &self.style);
+                if kind != "frame" {
+                    el.frame_id = frame::frame_at(&self.elements, p, &HashSet::new())
+                        .map(|i| self.elements[i].id.clone());
+                }
                 if el.is_linear() {
                     el.set_points(vec![[0.0, 0.0], [0.0, 0.0]]);
                 }
@@ -2349,6 +2540,8 @@ impl App {
             Tool::Draw => {
                 let mut el = Element::new("freedraw", p.x as f64, p.y as f64, &self.style);
                 el.set_points(vec![[0.0, 0.0]]);
+                el.frame_id = frame::frame_at(&self.elements, p, &HashSet::new())
+                    .map(|i| self.elements[i].id.clone());
                 let id = el.id.clone();
                 self.elements.push(el);
                 self.selected.clear();
@@ -2370,6 +2563,7 @@ impl App {
                 if let Some(i) = self.element_at(p) {
                     marked.extend(self.group_of(i));
                 }
+                let marked = frame::with_children(&self.elements, &marked);
                 self.drag = Drag::Erase { last: p, marked };
             }
         }
@@ -2381,6 +2575,10 @@ impl App {
                 let id = self.elements[i].id.clone();
                 self.drag = Drag::None;
                 self.edit_text(&id);
+            }
+            Some(i) if frame::is_frame(&self.elements[i]) => {
+                let id = self.elements[i].id.clone();
+                self.rename_frame(&id);
             }
             Some(i)
                 if matches!(
@@ -2555,6 +2753,7 @@ impl App {
                     }
                 }
                 self.sync_bindings();
+                self.frame_hint = self.drop_frame(&moving, p);
             }
             Drag::BoxSelect { start, cur, base } => {
                 *cur = p;
@@ -2577,6 +2776,22 @@ impl App {
                     if e.group_ids.last().is_some_and(|g| groups.contains(g)) {
                         sel.insert(e.id.clone());
                     }
+                }
+                // um frame selecionado leva os filhos junto; não precisam ficar na seleção
+                let frames: HashSet<&String> = self
+                    .elements
+                    .iter()
+                    .filter(|e| frame::is_frame(e) && sel.contains(&e.id))
+                    .map(|e| &e.id)
+                    .collect();
+                let children: Vec<String> = self
+                    .elements
+                    .iter()
+                    .filter(|e| e.frame_id.as_ref().is_some_and(|f| frames.contains(f)))
+                    .map(|e| e.id.clone())
+                    .collect();
+                for c in children {
+                    sel.remove(&c);
                 }
                 self.selected = sel;
             }
@@ -2644,7 +2859,7 @@ impl App {
                     }
                 }
                 for i in hits {
-                    let gset = self.group_of(i);
+                    let gset = frame::with_children(&self.elements, &self.group_of(i));
                     if let Drag::Erase { marked, .. } = &mut self.drag {
                         marked.extend(gset);
                     }
@@ -2683,18 +2898,47 @@ impl App {
                     self.selected.clear();
                     return;
                 }
+                if frame::is_frame(el) {
+                    frame::refresh_members(&mut self.elements, &id);
+                }
                 self.commit(before);
                 if !self.tool_locked {
                     self.tool = Tool::Select;
                 }
             }
             Drag::FreeDraw { before, .. } => self.commit(before),
-            Drag::Move { before, moved, .. } => {
+            Drag::Move {
+                before,
+                moved,
+                originals,
+                ..
+            } => {
+                self.frame_hint = None;
                 if moved {
+                    let moving: HashSet<String> = originals.into_iter().map(|o| o.0).collect();
+                    let target = self.drop_frame(&moving, p);
+                    // o que foi arrastado sozinho (sem o próprio frame) entra no
+                    // frame onde foi solto, ou sai do frame
+                    let loose: HashSet<String> = self
+                        .elements
+                        .iter()
+                        .filter(|e| {
+                            moving.contains(&e.id)
+                                && e.frame_id.as_ref().is_none_or(|f| !moving.contains(f))
+                        })
+                        .map(|e| e.id.clone())
+                        .collect();
+                    frame::assign(&mut self.elements, &loose, target.as_deref());
                     self.commit(before);
                 }
             }
-            Drag::Resize { before, .. } | Drag::Rotate { before, .. } => self.commit(before),
+            Drag::Resize { before, orig, .. } => {
+                if frame::is_frame(&orig) {
+                    frame::refresh_members(&mut self.elements, &orig.id);
+                }
+                self.commit(before);
+            }
+            Drag::Rotate { before, .. } => self.commit(before),
             Drag::Erase { marked, .. } => {
                 if !marked.is_empty() {
                     let before = self.elements.clone();
@@ -2706,6 +2950,19 @@ impl App {
             Drag::LinearMulti { id, before } => self.drag = Drag::LinearMulti { id, before },
             Drag::None | Drag::Pan { .. } | Drag::BoxSelect { .. } => {}
         }
+    }
+
+    /// Frame onde os elementos `moving` entram ao serem soltos em `p` (nenhum
+    /// se entre eles houver um frame: frames não ficam dentro de frames).
+    fn drop_frame(&self, moving: &HashSet<String>, p: P) -> Option<String> {
+        let has_frame = self
+            .elements
+            .iter()
+            .any(|e| frame::is_frame(e) && moving.contains(&e.id));
+        if has_frame {
+            return None;
+        }
+        frame::frame_at(&self.elements, p, moving).map(|i| self.elements[i].id.clone())
     }
 
     // ------------------------------------------------------------------
@@ -2922,6 +3179,9 @@ impl App {
             } else if let Some(el) = self.single_selected().filter(|e| e.kind == "text") {
                 let id = el.id.clone();
                 self.edit_text(&id);
+            } else if let Some(el) = self.single_selected().filter(|e| frame::is_frame(e)) {
+                let id = el.id.clone();
+                self.rename_frame(&id);
             }
         }
         // setas: mover a seleção 1px (Shift: 5px); com a grade, 1 célula (Shift: 1px)
@@ -2942,7 +3202,7 @@ impl App {
                     (false, true) => 5.0,
                 };
                 let before = self.elements.clone();
-                let sel = self.selected.clone();
+                let sel = frame::with_children(&self.elements, &self.selected);
                 self.unbind_detached(&sel);
                 for e in self.elements.iter_mut().filter(|e| sel.contains(&e.id)) {
                     e.x += dx * step;
@@ -2990,6 +3250,7 @@ impl App {
             (Key::Num8, Tool::Text),
             (Key::E, Tool::Eraser),
             (Key::Num0, Tool::Eraser),
+            (Key::F, Tool::Frame),
         ];
         for (key, tool) in tools {
             if k(n, key) {
@@ -3108,6 +3369,7 @@ impl App {
             _ => HashSet::new(),
         };
         let mut live: HashSet<&str> = HashSet::new();
+        let frame_rects = frame::rects(&self.elements);
         for el in &self.elements {
             live.insert(el.id.as_str());
             let entry = self.cache.entry(el.id.clone()).or_insert_with(|| Cached {
@@ -3122,7 +3384,8 @@ impl App {
                 entry.version = el.version;
                 entry.nonce = el.version_nonce;
             }
-            if Some(&el.id) == editing_id.as_ref() {
+            // frames são desenhados por cima, com espessura fixa na tela
+            if Some(&el.id) == editing_id.as_ref() || frame::is_frame(el) {
                 continue;
             }
             let b = &entry.bounds;
@@ -3133,8 +3396,18 @@ impl App {
             {
                 continue;
             }
+            // filhos de frame ficam recortados pela área do frame
+            let clipped;
+            let painter = match el.frame_id.as_deref().and_then(|f| frame_rects.get(f)) {
+                Some(r) => {
+                    let sr = egui::Rect::from_two_pos(self.cam.s(r.min), self.cam.s(r.max));
+                    clipped = painter.with_clip_rect(sr.intersect(rect));
+                    &clipped
+                }
+                None => &painter,
+            };
             let pc = PaintCtx {
-                painter: &painter,
+                painter,
                 cam: self.cam,
                 dark: self.dark,
                 alpha: if marked.contains(&el.id) { 0.25 } else { 1.0 },
@@ -3147,6 +3420,7 @@ impl App {
             let keep: HashSet<String> = live.iter().map(|s| s.to_string()).collect();
             self.cache.retain(|k, _| keep.contains(k));
         }
+        self.paint_frames(&painter);
 
         // seleção
         let sel_stroke = Stroke::new(1.0, SELECTION);
@@ -3226,6 +3500,55 @@ impl App {
                 StrokeKind::Middle,
             );
         }
+    }
+
+    /// Bordas e nomes dos frames (espessura e fonte fixas na tela, como no Excalidraw).
+    fn paint_frames(&mut self, painter: &egui::Painter) {
+        let mut labels = vec![];
+        let renaming = self.renaming.as_ref().map(|r| r.id.as_str());
+        for el in self.elements.iter().filter(|e| frame::is_frame(e)) {
+            let r = frame::rect(el);
+            let sr = egui::Rect::from_two_pos(self.cam.s(r.min), self.cam.s(r.max));
+            let stroke_col = crate::model::parse_color(&el.stroke_color)
+                .map(|c| render::c32(c, self.dark, el.opacity as f32 / 100.0))
+                .unwrap_or(Color32::GRAY);
+            let hinted = self.frame_hint.as_deref() == Some(el.id.as_str());
+            let radius = (frame::RADIUS * self.cam.zoom).min(sr.width().min(sr.height()) / 2.0);
+            painter.rect_stroke(
+                sr,
+                radius,
+                if hinted {
+                    Stroke::new(2.0, SELECTION)
+                } else {
+                    Stroke::new(1.0, stroke_col)
+                },
+                StrokeKind::Middle,
+            );
+            if renaming == Some(el.id.as_str()) {
+                continue;
+            }
+            let selected = self.selected.contains(&el.id);
+            let col = if selected {
+                SELECTION
+            } else {
+                render::c32(frame::NAME_COLOR, self.dark, 1.0)
+            };
+            let galley = painter.layout_no_wrap(
+                frame::name(el),
+                egui::FontId::proportional(frame::NAME_SIZE),
+                col,
+            );
+            let size = galley.size();
+            let w = size.x.min(sr.width()).max(1.0);
+            let top = sr.min.y - frame::NAME_GAP - size.y;
+            let label = egui::Rect::from_min_size(egui::pos2(sr.min.x, top), egui::vec2(w, size.y));
+            // nome mais largo que o frame é cortado
+            painter
+                .with_clip_rect(label.intersect(painter.clip_rect()))
+                .galley(label.min, galley, col);
+            labels.push((el.id.clone(), label));
+        }
+        self.frame_labels = labels;
     }
 
     /// Guias do encaixe em objetos: linhas com um "x" em cada ponto alinhado.
@@ -3604,6 +3927,19 @@ mod tests {
             None,
             "forma não copiada: solta"
         );
+    }
+
+    #[test]
+    fn copies_of_a_frame_take_their_children() {
+        let s = Style::default();
+        let f = Element::new("frame", 0.0, 0.0, &s);
+        let mut inside = Element::new("rectangle", 10.0, 10.0, &s);
+        inside.frame_id = Some(f.id.clone());
+        let copies = App::clone_with_new_ids(&[inside.clone(), f.clone()], P::new(10.0, 10.0));
+        assert_eq!(copies[0].frame_id.as_ref(), Some(&copies[1].id));
+        // copiar só o filho mantém o frame de origem
+        let alone = App::clone_with_new_ids(&[inside], P::new(10.0, 10.0));
+        assert_eq!(alone[0].frame_id.as_ref(), Some(&f.id));
     }
 
     #[test]

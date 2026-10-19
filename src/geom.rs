@@ -121,6 +121,14 @@ impl Rect {
     pub fn contains_rect(&self, o: &Rect) -> bool {
         self.contains(o.min) && self.contains(o.max)
     }
+    /// Parte em comum, se houver.
+    pub fn intersect(&self, o: &Rect) -> Option<Rect> {
+        let r = Rect {
+            min: P::new(self.min.x.max(o.min.x), self.min.y.max(o.min.y)),
+            max: P::new(self.max.x.min(o.max.x), self.max.y.min(o.max.y)),
+        };
+        (r.min.x <= r.max.x && r.min.y <= r.max.y).then_some(r)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -607,8 +615,24 @@ pub fn element_prims(el: &Element) -> Vec<Prim> {
             center: b.center(),
             opacity,
         }),
+        "frame" | "magicframe" => {
+            // só a borda; o nome é desenhado à parte (ver `frame`)
+            if let Some(color) = stroke {
+                let r = crate::frame::RADIUS
+                    .min(b.width() / 2.0)
+                    .min(b.height() / 2.0);
+                let mut pts = rounded_rect_outline(&b, r);
+                pts.push(pts[0]);
+                prims.push(Prim::Stroke {
+                    pts,
+                    color,
+                    width: 1.0,
+                    dash: None,
+                });
+            }
+        }
         _ => {
-            // Tipos ainda não suportados (frame, embed...): moldura tracejada.
+            // Tipos ainda não suportados (embed...): moldura tracejada.
             let pts = [
                 b.min,
                 P::new(b.max.x, b.min.y),
@@ -865,6 +889,16 @@ pub fn hit_test(el: &Element, p: P, tol: f32) -> bool {
             dist_to_polyline(q, &pts, false) <= tol + extra
                 || (closed && filled && point_in_polygon(q, &pts))
         }
+        // frames: só a borda (o nome é tratado no app); dentro ficam os filhos
+        "frame" | "magicframe" => {
+            let pts = [
+                b.min,
+                P::new(b.max.x, b.min.y),
+                b.max,
+                P::new(b.min.x, b.max.y),
+            ];
+            dist_to_polyline(q, &pts, true) <= tol
+        }
         _ => b.expand(tol * 0.5).contains(q),
     }
 }
@@ -894,6 +928,15 @@ mod tests {
     }
 
     #[test]
+    fn frame_hits_only_on_its_border() {
+        let mut f = Element::new("frame", 0.0, 0.0, &Style::default());
+        f.width = 100.0;
+        f.height = 100.0;
+        assert!(hit_test(&f, P::new(0.0, 50.0), 2.0));
+        assert!(!hit_test(&f, P::new(50.0, 50.0), 2.0));
+    }
+
+    #[test]
     fn rotated_bounds() {
         let mut e = Element::new("rectangle", 0.0, 0.0, &Style::default());
         e.width = 100.0;
@@ -916,6 +959,7 @@ mod tests {
             "freedraw",
             "text",
             "image",
+            "frame",
         ] {
             let mut e = Element::new(k, 10.0, 10.0, &s);
             e.width = 80.0;

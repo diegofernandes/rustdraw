@@ -27,6 +27,7 @@ enum Icon {
     Text,
     Image,
     Eraser,
+    Frame,
     Lock(bool),
     Menu,
     Undo,
@@ -171,6 +172,13 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, col: Color32) {
                 s,
             ));
             p.line_segment([rel(r, 0.33, 0.4), rel(r, 0.7, 0.77)], s);
+        }
+        Icon::Frame => {
+            // cerquilha: as bordas passam um pouco dos cantos
+            for t in [0.25, 0.75] {
+                p.line_segment([rel(r, 0.05, t), rel(r, 0.95, t)], s);
+                p.line_segment([rel(r, t, 0.05), rel(r, t, 0.95)], s);
+            }
         }
         Icon::Lock(locked) => {
             let body = Rect::from_min_max(rel(r, 0.18, 0.48), rel(r, 0.82, 0.95));
@@ -402,8 +410,13 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
             app.selected.contains(&e.id) || app.editing.as_ref().is_some_and(|ed| ed.id == e.id)
         })
         .map(|e| e.kind.clone())
+        .filter(|k| !matches!(k.as_str(), "frame" | "magicframe"))
         .collect();
-    let tool_kind = app.tool.kind().map(|k| k.to_string());
+    let tool_kind = app
+        .tool
+        .kind()
+        .filter(|k| *k != "frame")
+        .map(|k| k.to_string());
     let kinds: Vec<String> = if sel_kinds.is_empty() {
         tool_kind.into_iter().collect()
     } else {
@@ -894,6 +907,7 @@ fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
                         // imagem não é um modo: abre o seletor de arquivo
                         (Tool::Select, Icon::Image, "Inserir imagem (9)", "9"),
                         (Tool::Eraser, Icon::Eraser, "Borracha (E ou 0)", "0"),
+                        (Tool::Frame, Icon::Frame, "Frame (F)", "F"),
                     ];
                     for (tool, icon, tip, key) in tools {
                         let is_image = icon == Icon::Image;
@@ -1059,6 +1073,8 @@ enum Act {
     Duplicate,
     Lock,
     Delete,
+    ExportFrame,
+    RenameFrame,
 }
 
 enum Entry {
@@ -1069,7 +1085,7 @@ enum Entry {
 
 /// Itens do menu do botão direito, na mesma ordem do Excalidraw
 /// (`App.tsx`, `getContextMenuItems`). Ficam de fora os itens de recursos que o
-/// RustDraw ainda não tem (frames, links, recorte de imagem...).
+/// RustDraw ainda não tem (links, recorte de imagem...).
 fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
     use Entry::{Item, Sep};
     let has_elements = !app.elements.is_empty();
@@ -1135,6 +1151,13 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
         }
         if app.can_ungroup() {
             v.push(Item("Desagrupar", "Ctrl+Shift+G", Act::Ungroup, None));
+        }
+        if app.selected_frame().is_some() {
+            v.extend([
+                Sep,
+                Item("Renomear frame", "Enter", Act::RenameFrame, None),
+                Item("Exportar frame…", "", Act::ExportFrame, None),
+            ]);
         }
         let lock = if app.selection_locked() {
             "Destravar"
@@ -1204,6 +1227,12 @@ fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
         Act::Duplicate => app.duplicate_selected(),
         Act::Lock => app.toggle_lock(),
         Act::Delete => app.delete_selected(),
+        Act::ExportFrame => app.export_selected_frame(),
+        Act::RenameFrame => {
+            if let Some(id) = app.selected_frame().map(|f| f.id.clone()) {
+                app.rename_frame(&id);
+            }
+        }
     }
 }
 
@@ -1423,18 +1452,55 @@ fn text_editor(app: &mut App, ctx: &egui::Context) {
         });
 }
 
+/// Campo para renomear um frame, no lugar do nome dele.
+fn frame_name_editor(app: &mut App, ctx: &egui::Context) {
+    let Some(r) = &app.renaming else { return };
+    let Some(f) = app.elements.iter().find(|e| e.id == r.id) else {
+        app.renaming = None;
+        return;
+    };
+    let rect = crate::frame::rect(f);
+    let top_left = app.cam.s(rect.min);
+    let width = (rect.width() * app.cam.zoom).max(120.0);
+    let font = FontId::proportional(crate::frame::NAME_SIZE);
+    let pos = top_left - vec2(0.0, crate::frame::NAME_GAP + font.size * 1.25 + 4.0);
+    let mut done = false;
+    egui::Area::new(Id::unique("frame_name_editor"))
+        .fixed_pos(pos)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let r = app.renaming.as_mut().unwrap();
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut r.buf)
+                    .id(Id::unique("frame_name_field"))
+                    .font(font)
+                    .desired_width(width),
+            );
+            if r.focus {
+                resp.request_focus();
+                r.focus = false;
+            } else if resp.lost_focus() {
+                done = true;
+            }
+        });
+    if done {
+        app.finish_rename();
+    }
+}
+
 fn export_window(app: &mut App, ctx: &egui::Context) {
     if !app.show_export {
         return;
     }
     // pré-visualização
-    let els = app.export_elements();
+    let (els, opts) = app.export_job();
     let key = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{:?}|{}|{}",
         app.export_opts.background,
         app.export_opts.dark,
         app.export_selection_only,
         app.view_bg,
+        opts.frame,
         els.len(),
         els.iter()
             .map(|e| e.version_nonce)
@@ -1447,10 +1513,8 @@ fn export_window(app: &mut App, ctx: &egui::Context) {
         .unwrap_or(true)
         && !els.is_empty()
     {
-        let mut o = app.export_opts.clone();
-        o.view_background = app.view_bg.clone();
-        o.files = crate::files::subset(&app.files, &els);
-        if let Some(b) = crate::geom::scene_bounds(els.iter()) {
+        let mut o = opts.clone();
+        if let Some(b) = crate::export::export_bounds(&els, &o) {
             o.scale = (340.0 / (b.width() + 20.0))
                 .min(200.0 / (b.height() + 20.0))
                 .min(2.0);
@@ -1514,7 +1578,12 @@ fn export_window(app: &mut App, ctx: &egui::Context) {
             ui.checkbox(&mut app.export_opts.background, "Incluir fundo");
             ui.checkbox(&mut app.export_opts.dark, "Modo escuro");
             ui.add_enabled_ui(!app.selected.is_empty(), |ui| {
-                ui.checkbox(&mut app.export_selection_only, "Somente a seleção");
+                let label = if app.selected_frame().is_some() {
+                    "Somente o frame selecionado"
+                } else {
+                    "Somente a seleção"
+                };
+                ui.checkbox(&mut app.export_selection_only, label);
             });
             ui.horizontal(|ui| {
                 ui.label("Escala:");
@@ -1569,7 +1638,9 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Texto", "T ou 8"),
                     ("Inserir imagem", "9"),
                     ("Borracha", "E ou 0"),
+                    ("Frame", "F"),
                     ("Editar texto", "Enter"),
+                    ("Renomear frame", "Enter · duplo clique no nome"),
                     ("Concluir texto", "Esc · Ctrl+Enter"),
                     ("Manter ferramenta ativa", "Q"),
                     ("Trocar tipo da forma", "Tab · Shift+Tab"),
@@ -1777,6 +1848,9 @@ fn hint(app: &App, ctx: &egui::Context) {
         }
         (_, Tool::Text) => "Clique para escrever",
         (_, Tool::Eraser) => "Clique ou arraste sobre os elementos para apagar",
+        (_, Tool::Frame) => {
+            "Arraste para criar um frame · o que ficar dentro passa a fazer parte dele"
+        }
         (_, Tool::Select) if app.elements.is_empty() => {
             "Escolha uma ferramenta acima ou dê duplo clique para escrever · ? mostra os atalhos"
         }
@@ -1815,6 +1889,7 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
     stats_window(app, ctx);
     app.open_picker = None;
     text_editor(app, ctx);
+    frame_name_editor(app, ctx);
     export_window(app, ctx);
     help_window(app, ctx);
     confirm_window(app, ctx);

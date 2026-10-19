@@ -214,6 +214,9 @@ impl Element {
                 extra.insert("autoResize".into(), Value::Bool(true));
                 extra.insert("lineHeight".into(), json!(LINE_HEIGHT));
             }
+            "frame" => {
+                extra.insert("name".into(), Value::Null);
+            }
             "image" => {
                 extra.insert("fileId".into(), Value::Null);
                 extra.insert("status".into(), json!("saved"));
@@ -232,6 +235,21 @@ impl Element {
             None
         };
         let is_text = kind == "text";
+        if kind == "frame" {
+            // estilo fixo dos frames (`FRAME_STYLE` do Excalidraw)
+            let mut el = Self::new("rectangle", x, y, style);
+            el.kind = kind.into();
+            el.extra = extra;
+            el.stroke_color = "#bbb".into();
+            el.background_color = "transparent".into();
+            el.fill_style = "solid".into();
+            el.stroke_width = 2.0;
+            el.stroke_style = "solid".into();
+            el.roughness = 0.0;
+            el.opacity = 100.0;
+            el.roundness = None;
+            return el;
+        }
         let is_image = kind == "image";
         Self {
             id: new_id(),
