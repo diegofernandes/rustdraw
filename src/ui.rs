@@ -1724,9 +1724,9 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
         .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.label(if some {
-                "Remover os itens marcados da biblioteca? Isto não pode ser desfeito."
+                "Remover os itens marcados da biblioteca? Dá para desfazer logo depois, no painel."
             } else {
-                "Remover todos os itens da biblioteca? Isto não pode ser desfeito."
+                "Remover todos os itens da biblioteca? Dá para desfazer logo depois, no painel."
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1881,6 +1881,7 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
         props_panel(app, ctx);
         menu(app, ctx);
         library_panel(app, ctx, view);
+        library_edit_banner(app, ctx);
     } else {
         app.library_drag = None;
     }
@@ -2080,6 +2081,7 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
     }
     let height = (view.height() - 60.0 - 64.0).max(160.0);
     let mut insert: Option<String> = None;
+    let mut drop_target: Option<String> = None;
     let resp = egui::Area::new(Id::unique("library"))
         .anchor(Align2::RIGHT_TOP, vec2(-12.0, 60.0))
         .order(egui::Order::Middle)
@@ -2146,6 +2148,50 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
                             }
                         });
                     }
+                    if let Some((_, what)) = app.library_undo.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(what)
+                                    .size(11.5)
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            if ui.small_button("Desfazer").clicked() {
+                                app.undo_library();
+                            }
+                            if ui
+                                .add(egui::Button::new("✕").frame(false).small())
+                                .on_hover_text("Dispensar")
+                                .clicked()
+                            {
+                                app.library_undo = None;
+                            }
+                        });
+                    }
+                    if let Some((_, buf)) = &mut app.library_rename {
+                        let mut done = None;
+                        ui.horizontal(|ui| {
+                            let r = ui.add(
+                                egui::TextEdit::singleline(buf)
+                                    .hint_text("Nome do item")
+                                    .desired_width(LIB_W - 90.0),
+                            );
+                            if !r.has_focus() && !r.lost_focus() {
+                                r.request_focus();
+                            }
+                            if r.lost_focus() {
+                                done = Some(!ui.input(|i| i.key_pressed(egui::Key::Escape)));
+                            }
+                            if ui.small_button("OK").clicked() {
+                                done = Some(true);
+                            }
+                            if ui.small_button("✕").on_hover_text("Cancelar").clicked() {
+                                done = Some(false);
+                            }
+                        });
+                        if let Some(commit) = done {
+                            app.finish_rename_library_item(commit);
+                        }
+                    }
                     ui.add_space(4.0);
                     let can_add = !app.selected.is_empty();
                     if app.library.is_empty() && !can_add {
@@ -2173,7 +2219,14 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
                             for row in ids.chunks(3) {
                                 ui.horizontal(|ui| {
                                     for cell in row {
-                                        library_tile(app, ui, cell.as_deref(), &mut insert);
+                                        library_tile(
+                                            app,
+                                            ui,
+                                            cell.as_deref(),
+                                            view,
+                                            &mut insert,
+                                            &mut drop_target,
+                                        );
                                     }
                                 });
                             }
@@ -2196,10 +2249,13 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
         if let Some(p) = on_canvas {
             let at = app.cam.w(p);
             app.insert_library_item(&id, at);
+        } else if let Some(before) = drop_target {
+            // solto sobre outro item: reordena
+            app.move_library_item_before(&id, &before);
         }
         return;
     }
-    ctx.set_cursor_icon(if on_canvas.is_some() {
+    ctx.set_cursor_icon(if on_canvas.is_some() || drop_target.is_some() {
         egui::CursorIcon::Grabbing
     } else {
         egui::CursorIcon::NoDrop
@@ -2214,8 +2270,27 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
 }
 
 /// Um quadradinho da biblioteca: `None` é o botão "+" que adiciona a seleção.
-fn library_tile(app: &mut App, ui: &mut Ui, id: Option<&str>, insert: &mut Option<String>) {
+/// Arrastar um item sobre outro marca `drop_target` (reordenar).
+fn library_tile(
+    app: &mut App,
+    ui: &mut Ui,
+    id: Option<&str>,
+    view: Rect,
+    insert: &mut Option<String>,
+    drop_target: &mut Option<String>,
+) {
     let (rect, resp) = ui.allocate_exact_size(vec2(LIB_TILE, LIB_TILE), Sense::click_and_drag());
+    let dragging = app.library_drag.as_deref();
+    let drop_here = id.is_some_and(|id| {
+        dragging.is_some_and(|d| d != id)
+            && ui
+                .ctx()
+                .pointer_latest_pos()
+                .is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p))
+    });
+    if drop_here {
+        *drop_target = id.map(String::from);
+    }
     let marked = id.is_some_and(|id| app.library_selected.contains(id));
     let hovered = resp.hovered();
     let fill = if marked {
@@ -2256,29 +2331,123 @@ fn library_tile(app: &mut App, ui: &mut Ui, id: Option<&str>, insert: &mut Optio
         }
         return;
     };
-    if let Some((b, prims)) = library_thumb(app, id) {
-        let inner = rect.shrink(8.0);
-        let zoom = (inner.width() / b.width().max(1.0))
-            .min(inner.height() / b.height().max(1.0))
-            .min(1.5);
-        let painter = ui.painter_at(rect.shrink(2.0));
-        paint_library_prims(app, &painter, &b, &prims, rect.center(), zoom, 1.0);
-    }
-    if resp.drag_started() {
-        app.library_drag = Some(id.to_string());
-    }
     let name = app
         .library
         .iter()
         .find(|i| i.id == id)
         .and_then(|i| i.name.clone());
-    let tip = match name {
-        Some(n) => {
-            format!("{n}\nClique para inserir · arraste para posicionar · Shift+clique marca")
-        }
-        None => "Clique para inserir · arraste para posicionar · Shift+clique marca".into(),
+    let editing = app.library_edit.as_deref() == Some(id);
+    if let Some((b, prims)) = library_thumb(app, id) {
+        let inner = rect.shrink(8.0);
+        let inner = if name.is_some() {
+            Rect::from_min_max(inner.min, inner.max - vec2(0.0, 12.0))
+        } else {
+            inner
+        };
+        let zoom = (inner.width() / b.width().max(1.0))
+            .min(inner.height() / b.height().max(1.0))
+            .min(1.5);
+        let painter = ui.painter_at(rect.shrink(2.0));
+        paint_library_prims(app, &painter, &b, &prims, inner.center(), zoom, 1.0);
+    }
+    let p = ui.painter();
+    if let Some(n) = &name {
+        let short: String = if n.chars().count() > 12 {
+            n.chars().take(11).chain(['…']).collect()
+        } else {
+            n.clone()
+        };
+        p.text(
+            rect.center_bottom() - vec2(0.0, 4.0),
+            Align2::CENTER_BOTTOM,
+            short,
+            FontId::proportional(10.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    if editing {
+        p.rect_stroke(
+            rect.expand(1.0),
+            7.0,
+            Stroke::new(2.0, Color32::from_rgb(0xf0, 0x8c, 0x00)),
+            StrokeKind::Middle,
+        );
+    }
+    if drop_here {
+        // o item arrastado entra antes deste
+        let x = rect.left() - 3.0;
+        p.line_segment(
+            [pos2(x, rect.top() + 4.0), pos2(x, rect.bottom() - 4.0)],
+            Stroke::new(3.0, SELECTION),
+        );
+    }
+    if resp.drag_started() {
+        app.library_drag = Some(id.to_string());
+    }
+    const HELP: &str = "Clique para inserir · arraste para o canvas ou para outro item · \
+                        Shift+clique marca · botão direito para mais opções";
+    let tip = match &name {
+        Some(n) => format!("{n}\n{HELP}"),
+        None => HELP.into(),
     };
     let resp = resp.on_hover_text(tip);
+    let last = app.library.len().saturating_sub(1);
+    let pos = app.library.iter().position(|i| i.id == id).unwrap_or(0);
+    resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        if ui.button("Inserir no centro").clicked() {
+            *insert = Some(id.to_string());
+            ui.close();
+        }
+        if ui.button("Editar no canvas").clicked() {
+            let at = app.view_center(view);
+            app.edit_library_item(id, at);
+            ui.close();
+        }
+        if ui.button("Renomear…").clicked() {
+            app.start_rename_library_item(id);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(pos > 0, egui::Button::new("Mover para trás"))
+            .clicked()
+        {
+            app.move_library_item(id, pos - 1);
+            ui.close();
+        }
+        if ui
+            .add_enabled(pos < last, egui::Button::new("Mover para frente"))
+            .clicked()
+        {
+            app.move_library_item(id, pos + 1);
+            ui.close();
+        }
+        if ui
+            .add_enabled(pos > 0, egui::Button::new("Mover para o início"))
+            .clicked()
+        {
+            app.move_library_item(id, 0);
+            ui.close();
+        }
+        if ui
+            .add_enabled(pos < last, egui::Button::new("Mover para o fim"))
+            .clicked()
+        {
+            app.move_library_item(id, usize::MAX);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Exportar…").clicked() {
+            app.export_library_item(id);
+            ui.close();
+        }
+        let danger = ui.visuals().error_fg_color;
+        if ui.button(RichText::new("Remover").color(danger)).clicked() {
+            app.remove_library_item(id);
+            ui.close();
+        }
+    });
     if resp.clicked() {
         if ui.input(|i| i.modifiers.shift) || !app.library_selected.is_empty() {
             if !app.library_selected.remove(id) {
@@ -2288,4 +2457,41 @@ fn library_tile(app: &mut App, ui: &mut Ui, id: Option<&str>, insert: &mut Optio
             *insert = Some(id.to_string());
         }
     }
+}
+
+/// Faixa mostrada enquanto um item da biblioteca é editado no canvas.
+fn library_edit_banner(app: &mut App, ctx: &egui::Context) {
+    let Some(id) = app.library_edit.clone() else {
+        return;
+    };
+    let name = app
+        .library
+        .iter()
+        .find(|i| i.id == id)
+        .and_then(|i| i.name.clone());
+    egui::Area::new(Id::unique("library_edit"))
+        .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -60.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            panel_frame(ui)
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(match name {
+                            Some(n) => format!("Editando \u{201c}{n}\u{201d} da biblioteca."),
+                            None => "Editando um item da biblioteca.".into(),
+                        });
+                        ui.label(
+                            RichText::new("Selecione o que deve ficar no item e salve.")
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        if ui.button("Salvar no item").clicked() {
+                            app.save_library_edit();
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            app.cancel_library_edit();
+                        }
+                    });
+                });
+        });
 }

@@ -244,6 +244,12 @@ pub struct App {
     pub library_drag: Option<String>,
     /// Miniaturas já calculadas: limites e primitivas de cada item.
     pub library_thumbs: HashMap<String, (Rect, Vec<Prim>)>,
+    /// Estado da biblioteca antes da última remoção ou edição, para "Desfazer".
+    pub library_undo: Option<(Vec<LibraryItem>, String)>,
+    /// Item sendo renomeado e o texto digitado.
+    pub library_rename: Option<(String, String)>,
+    /// Item sendo editado no canvas (ver [`App::edit_library_item`]).
+    pub library_edit: Option<String>,
 }
 
 /// O que fazer com o caminho escolhido no diálogo de arquivos.
@@ -414,6 +420,9 @@ impl App {
             library_selected: HashSet::new(),
             library_drag: None,
             library_thumbs: HashMap::new(),
+            library_undo: None,
+            library_rename: None,
+            library_edit: None,
         };
         if let Some(p) = open {
             app.load_path(&p);
@@ -815,27 +824,168 @@ impl App {
                 .cloned()
                 .collect()
         };
+        self.export_library_items(items);
+    }
+
+    fn export_library_items(&mut self, items: Vec<LibraryItem>) {
         if items.is_empty() {
             self.toast("A biblioteca está vazia");
             return;
         }
+        let name: String = match items.as_slice() {
+            [one] => one
+                .name
+                .as_deref()
+                .map(|n| {
+                    n.chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || " -_".contains(c) {
+                                c
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|| "biblioteca".into()),
+            _ => "biblioteca".into(),
+        };
         let fut = rfd::AsyncFileDialog::new()
             .set_title("Exportar biblioteca")
             .add_filter("Biblioteca do Excalidraw", &[library::EXT])
-            .set_file_name(format!("biblioteca.{}", library::EXT))
+            .set_file_name(format!("{name}.{}", library::EXT))
             .save_file();
         self.start_dialog(DialogKind::ExportLibrary(items), fut);
+    }
+
+    /// Guarda o estado atual para o "Desfazer" do painel.
+    fn library_snapshot(&mut self, what: impl Into<String>) {
+        self.library_undo = Some((self.library.clone(), what.into()));
     }
 
     /// Remove os itens marcados ou, sem marcação, todos.
     pub fn remove_library_items(&mut self) {
         if self.library_selected.is_empty() {
+            self.library_snapshot("Biblioteca limpa");
             self.library.clear();
         } else {
             let sel = std::mem::take(&mut self.library_selected);
+            self.library_snapshot(if sel.len() == 1 {
+                "1 item removido".to_string()
+            } else {
+                format!("{} itens removidos", sel.len())
+            });
             self.library.retain(|i| !sel.contains(&i.id));
         }
+        self.after_library_removal();
+    }
+
+    pub fn remove_library_item(&mut self, id: &str) {
+        self.library_snapshot("Item removido");
+        self.library.retain(|i| i.id != id);
+        self.after_library_removal();
+    }
+
+    fn after_library_removal(&mut self) {
+        let ids: HashSet<&str> = self.library.iter().map(|i| i.id.as_str()).collect();
+        if self
+            .library_edit
+            .as_ref()
+            .is_some_and(|e| !ids.contains(e.as_str()))
+        {
+            self.library_edit = None;
+        }
+        if self
+            .library_rename
+            .as_ref()
+            .is_some_and(|(r, _)| !ids.contains(r.as_str()))
+        {
+            self.library_rename = None;
+        }
         self.save_library();
+    }
+
+    /// Volta a biblioteca ao estado de antes da última remoção ou edição.
+    pub fn undo_library(&mut self) {
+        if let Some((items, _)) = self.library_undo.take() {
+            self.library = items;
+            self.library_thumbs.clear();
+            self.save_library();
+        }
+    }
+
+    pub fn start_rename_library_item(&mut self, id: &str) {
+        let name = self
+            .library
+            .iter()
+            .find(|i| i.id == id)
+            .and_then(|i| i.name.clone())
+            .unwrap_or_default();
+        self.library_rename = Some((id.to_string(), name));
+    }
+
+    pub fn finish_rename_library_item(&mut self, commit: bool) {
+        if let Some((id, name)) = self.library_rename.take()
+            && commit
+            && library::rename(&mut self.library, &id, &name)
+        {
+            self.save_library();
+        }
+    }
+
+    /// Move o item para a posição `to` (0 = início; além do fim = fim).
+    pub fn move_library_item(&mut self, id: &str, to: usize) {
+        if library::move_item(&mut self.library, id, to) {
+            self.save_library();
+        }
+    }
+
+    /// Arrastar dentro do painel: põe `id` antes de `before`.
+    pub fn move_library_item_before(&mut self, id: &str, before: &str) {
+        if library::move_before(&mut self.library, id, before) {
+            self.save_library();
+        }
+    }
+
+    /// "Editar no canvas": insere uma cópia do item e espera "Salvar no item".
+    pub fn edit_library_item(&mut self, id: &str, at: P) {
+        self.finish_rename_library_item(true);
+        self.insert_library_item(id, at);
+        self.library_edit = Some(id.to_string());
+    }
+
+    /// Grava a seleção atual como o novo conteúdo do item em edição.
+    pub fn save_library_edit(&mut self) {
+        let Some(id) = self.library_edit.clone() else {
+            return;
+        };
+        let els: Vec<Element> = self.selected_elements().into_iter().cloned().collect();
+        if els.is_empty() {
+            self.toast("Selecione os elementos que devem ficar no item");
+            return;
+        }
+        self.library_snapshot("Item atualizado");
+        if library::replace_elements(&mut self.library, &id, els) {
+            self.library_thumbs.remove(&id);
+            self.save_library();
+            self.toast("Item da biblioteca atualizado");
+        }
+        self.library_edit = None;
+    }
+
+    pub fn cancel_library_edit(&mut self) {
+        self.library_edit = None;
+    }
+
+    /// Exporta só estes itens (menu de um item).
+    pub fn export_library_item(&mut self, id: &str) {
+        let items: Vec<LibraryItem> = self
+            .library
+            .iter()
+            .filter(|i| i.id == id)
+            .cloned()
+            .collect();
+        self.export_library_items(items);
     }
 
     /// Insere uma cópia do item centralizada em `at` (mundo) e a seleciona.
