@@ -91,14 +91,29 @@ jobs:
         shell: bash
         env:
           PKG: ${{ steps.version.outputs.pkg }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p "dist/$PKG"
           case "${{ matrix.platform }}" in
             macos-universal)
-              lipo -create -output "dist/$PKG/rustdraw" \
+              # Um executável solto aberto pelo Finder roda dentro do Terminal;
+              # dentro de um bundle .app ele abre só a janela do editor.
+              app="dist/$PKG/RustDraw.app"
+              mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+              lipo -create -output "$app/Contents/MacOS/rustdraw" \
                 target/aarch64-apple-darwin/release/rustdraw \
                 target/x86_64-apple-darwin/release/rustdraw
-              lipo -info "dist/$PKG/rustdraw"
+              lipo -info "$app/Contents/MacOS/rustdraw"
+              # CFBundleShortVersionString só aceita X.Y.Z (sem -dev.abc1234)
+              bundle_version="${VERSION%%-*}"
+              sed "s/@VERSION@/$bundle_version/g" packaging/macos/Info.plist \
+                > "$app/Contents/Info.plist"
+              plutil -lint "$app/Contents/Info.plist"
+              printf 'APPL????' > "$app/Contents/PkgInfo"
+              # Assinatura ad-hoc do bundle inteiro (o Apple Silicon exige
+              # alguma assinatura e o Info.plist precisa estar selado nela)
+              codesign --force --sign - "$app"
+              codesign --verify --strict --verbose=2 "$app"
               ;;
             windows-*)
               cp "target/${{ matrix.targets }}/release/rustdraw.exe" "dist/$PKG/"
