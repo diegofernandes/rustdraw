@@ -529,8 +529,11 @@ pub fn element_prims(el: &Element) -> Vec<Prim> {
                     fill(&mut prims, &pts, &mut rng);
                 }
                 let curved = el.is_round() && pts.len() > 2;
+                let elbow = el.is_elbow();
                 let lines = if curved {
                     rough::curve(&pts, &o, &mut rng)
+                } else if elbow {
+                    rough::linear_path(&crate::elbow::rounded_path(&pts), false, &o, &mut rng)
                 } else {
                     rough::linear_path(&pts, false, &o, &mut rng)
                 };
@@ -553,12 +556,16 @@ pub fn element_prims(el: &Element) -> Vec<Prim> {
                                 ideal.clone()
                             };
                             let tip = path[0];
-                            let prev = path
-                                .iter()
-                                .skip(1)
-                                .find(|p| (**p - tip).len() >= 20.0)
-                                .copied()
-                                .unwrap_or(path[path.len() - 1]);
+                            // em cotovelo, a ponta segue o último segmento
+                            let prev = if elbow {
+                                path[1]
+                            } else {
+                                path.iter()
+                                    .skip(1)
+                                    .find(|p| (**p - tip).len() >= 20.0)
+                                    .copied()
+                                    .unwrap_or(path[path.len() - 1])
+                            };
                             let total: f32 = path.windows(2).map(|w| (w[1] - w[0]).len()).sum();
                             arrowhead(
                                 &mut prims, &kind, tip, prev, total, sw, stroke, &ho, &mut rng,

@@ -1,6 +1,7 @@
 //! Estado do editor, entrada de ponteiro/teclado e ações.
 
 use crate::binding::{self, Binding, Candidate};
+use crate::elbow;
 use crate::export::{self, ExportOpts};
 use crate::files;
 use crate::frame;
@@ -12,11 +13,13 @@ use crate::snap;
 use crate::watch::Watch;
 use egui::{Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Sense, Stroke, StrokeKind};
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 pub const SELECTION: Color32 = Color32::from_rgb(0x69, 0x65, 0xdb);
 const HANDLE_PX: f32 = 7.0;
+/// Segmentos mais curtos que isso (pixels de tela) não mostram a alça do meio.
+const MID_MIN_PX: f32 = 28.0;
 const GRID: f32 = 20.0;
 /// De quanto em quanto tempo o arquivo aberto é consultado no disco.
 const WATCH_INTERVAL_MS: u64 = 700;
@@ -64,6 +67,9 @@ pub enum Handle {
     SW,
     Rotate,
     Point(usize),
+    /// Meio do segmento que começa no ponto `i` de uma linha/seta: arrastar
+    /// insere um ponto (em cotovelo, move o segmento).
+    Mid(usize),
 }
 
 pub enum Drag {
@@ -104,6 +110,21 @@ pub enum Drag {
     },
     Rotate {
         orig: Element,
+        before: Vec<Element>,
+    },
+    /// Arrastando pontos de uma linha/seta (todos os selecionados juntos).
+    Points {
+        orig: Element,
+        indices: Vec<usize>,
+        start: P,
+        before: Vec<Element>,
+        /// O ponto foi criado agora (alça do meio): um clique sem arrastar desfaz.
+        inserted: bool,
+    },
+    /// Arrastando um segmento de uma seta em cotovelo.
+    Segment {
+        orig: Element,
+        index: usize,
         before: Vec<Element>,
     },
     Erase {
@@ -226,6 +247,8 @@ pub struct App {
     ctx: egui::Context,
     /// Forma (e ponto de encaixe) onde a ponta da seta vai ligar, para destacar.
     pub bind_hint: Option<Candidate>,
+    /// Pontos selecionados da linha/seta selecionada (Delete apaga só eles).
+    pub point_sel: Option<(String, BTreeSet<usize>)>,
     /// Estado das setas ligadas já vistas (ver `binding::sync`).
     bind_seen: HashMap<String, Vec<i64>>,
     /// Modificadores do último quadro (Ctrl/Cmd desliga a ligação de setas).
@@ -401,6 +424,7 @@ impl App {
             dialog: None,
             ctx: cc.egui_ctx.clone(),
             bind_hint: None,
+            point_sel: None,
             bind_seen: HashMap::new(),
             mods: Modifiers::NONE,
             frame_labels: vec![],
@@ -1758,7 +1782,9 @@ impl App {
                     e.background_color = "transparent".into();
                     e.set_field("elbowed", serde_json::Value::Bool(false));
                 } else {
-                    e.extra.remove("elbowed");
+                    for k in ["elbowed", "fixedSegments", "startIsSpecial", "endIsSpecial"] {
+                        e.extra.remove(k);
+                    }
                 }
             }
             e.touch();
@@ -1789,6 +1815,7 @@ impl App {
         }
         let before = self.elements.clone();
         let sel = self.selected.clone();
+        let mut rerouted = Vec::new();
         for e in self
             .elements
             .iter_mut()
@@ -1808,10 +1835,17 @@ impl App {
             e.stroke_style = src.stroke_style.clone();
             e.roughness = src.roughness;
             e.opacity = src.opacity;
-            if matches!(e.kind.as_str(), "rectangle" | "diamond" | "line" | "arrow") {
+            if matches!(e.kind.as_str(), "rectangle" | "diamond" | "line") {
                 e.roundness = src.is_round().then(
                     || serde_json::json!({"type": if e.kind == "rectangle" { 3 } else { 2 }}),
                 );
+            }
+            if e.kind == "arrow" && src.kind == "arrow" {
+                if e.is_elbow() != src.is_elbow() {
+                    elbow::set_elbowed(e, src.is_elbow());
+                    rerouted.push(e.id.clone());
+                }
+                e.roundness = src.is_round().then(|| serde_json::json!({"type": 2}));
             }
             if e.kind == "text" && src.kind == "text" {
                 for k in ["fontSize", "fontFamily", "textAlign"] {
@@ -1828,6 +1862,9 @@ impl App {
                 }
             }
             e.touch();
+        }
+        for id in &rerouted {
+            binding::refresh_arrow(&mut self.elements, id);
         }
         self.commit(before);
     }
@@ -2029,7 +2066,7 @@ impl App {
         let tol = 4.0 / self.cam.zoom as f64;
         if let Some(el) = self.get_mut(&id) {
             let mut pts = el.points();
-            while pts.len() > 2 {
+            while pts.len() > 2 && !el.is_elbow() {
                 let n = pts.len();
                 let (a, b) = (pts[n - 1], pts[n - 2]);
                 if (a[0] - b[0]).hypot(a[1] - b[1]) < tol {
@@ -2209,11 +2246,33 @@ impl App {
         let c = geom::center(el);
         let a = el.angle as f32;
         if el.is_linear() {
-            return geom::abs_points(el)
-                .into_iter()
-                .enumerate()
-                .map(|(i, p)| (Handle::Point(i), rotate(p, c, a)))
-                .collect();
+            let local = geom::abs_points(el);
+            let pts: Vec<P> = local.iter().map(|p| rotate(*p, c, a)).collect();
+            let n = pts.len();
+            let long = |i: usize| (pts[i + 1] - pts[i]).len() * z >= MID_MIN_PX;
+            let mut v: Vec<(Handle, P)> = Vec::new();
+            if el.is_elbow() {
+                // em cotovelo: só as pontas e o meio dos segmentos que se movem
+                v.push((Handle::Point(0), pts[0]));
+                if n > 1 {
+                    v.push((Handle::Point(n - 1), pts[n - 1]));
+                }
+                for i in elbow::movable_segments(n).filter(|&i| long(i)) {
+                    v.push((Handle::Mid(i), (pts[i] + pts[i + 1]) * 0.5));
+                }
+            } else {
+                v.extend(pts.iter().enumerate().map(|(i, p)| (Handle::Point(i), *p)));
+                let curved = el.is_round() && n > 2;
+                for i in (0..n.saturating_sub(1)).filter(|&i| long(i)) {
+                    let m = if curved {
+                        crate::rough::curve_mid(&local, i)
+                    } else {
+                        (local[i] + local[i + 1]) * 0.5
+                    };
+                    v.push((Handle::Mid(i), rotate(m, c, a)));
+                }
+            }
+            return v;
         }
         let b = geom::local_box(el);
         let pad = 4.0 / z;
@@ -2245,6 +2304,183 @@ impl App {
             .into_iter()
             .find(|(_, p)| (self.cam.s(*p) - screen).length() <= HANDLE_PX + 2.0)
             .map(|(h, _)| h)
+    }
+
+    /// Cursor sobre a alça do meio de um segmento.
+    fn mid_cursor(&self, i: usize) -> CursorIcon {
+        let Some(el) = self.single_selected().filter(|e| e.is_elbow()) else {
+            return CursorIcon::PointingHand;
+        };
+        let pts = geom::abs_points(el);
+        match (pts.get(i), pts.get(i + 1)) {
+            (Some(a), Some(b)) if (a.y - b.y).abs() < (a.x - b.x).abs() => {
+                CursorIcon::ResizeVertical
+            }
+            (Some(_), Some(_)) => CursorIcon::ResizeHorizontal,
+            _ => CursorIcon::Default,
+        }
+    }
+
+    /// Pontos selecionados, se ainda valem para a seleção atual.
+    fn valid_point_sel(&self) -> Option<&BTreeSet<usize>> {
+        let (id, set) = self.point_sel.as_ref()?;
+        let el = self
+            .single_selected()
+            .filter(|e| &e.id == id && e.is_linear())?;
+        let n = el.points().len();
+        (!set.is_empty() && set.iter().all(|&i| i < n)).then_some(set)
+    }
+
+    /// Clique num ponto: seleciona (Shift alterna). Devolve os pontos a
+    /// arrastar, ou `None` se o clique só tirou o ponto da seleção.
+    fn press_point(&mut self, el: &Element, i: usize, shift: bool) -> Option<Vec<usize>> {
+        if el.is_elbow() {
+            self.point_sel = None;
+            return Some(vec![i]);
+        }
+        let mut set = self.valid_point_sel().cloned().unwrap_or_default();
+        if shift {
+            if !set.remove(&i) {
+                set.insert(i);
+            }
+        } else if !set.contains(&i) {
+            set = [i].into();
+        }
+        let drag = set.contains(&i).then(|| set.iter().copied().collect());
+        self.point_sel = (!set.is_empty()).then(|| (el.id.clone(), set));
+        drag
+    }
+
+    /// Apaga os pontos selecionados da linha/seta. `false` se não havia nenhum.
+    fn delete_points(&mut self) -> bool {
+        let Some(set) = self.valid_point_sel().cloned() else {
+            self.point_sel = None;
+            return false;
+        };
+        self.point_sel = None;
+        let Some(el) = self
+            .single_selected()
+            .filter(|e| !e.is_elbow() && !e.locked)
+            .cloned()
+        else {
+            return false;
+        };
+        let pts = geom::abs_points(&el);
+        let n = pts.len();
+        let keep: Vec<[f64; 2]> = pts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !set.contains(i))
+            .map(|(_, p)| [p.x as f64, p.y as f64])
+            .collect();
+        if keep.len() < 2 {
+            self.delete_selected();
+            return true;
+        }
+        let before = self.elements.clone();
+        if let Some(e) = self.get_mut(&el.id) {
+            for (end, i) in [(false, 0), (true, n - 1)] {
+                if set.contains(&i) {
+                    binding::set(e, end, None);
+                }
+            }
+            e.set_abs_points(&keep);
+            e.touch();
+        }
+        self.commit(before);
+        true
+    }
+
+    /// Duplo clique com uma linha/seta selecionada: no meio de um segmento em
+    /// cotovelo, solta o segmento fixo; numa linha comum, adiciona um ponto ali.
+    fn double_click_linear(&mut self, p: P) -> bool {
+        let Some(el) = self
+            .single_selected()
+            .filter(|e| e.is_linear() && !e.locked)
+            .cloned()
+        else {
+            return false;
+        };
+        let before = match std::mem::replace(&mut self.drag, Drag::None) {
+            Drag::Segment { before, .. } | Drag::Points { before, .. } => before,
+            Drag::Move { before, .. } => before,
+            other => {
+                self.drag = other;
+                self.elements.clone()
+            }
+        };
+        let handle = self.handle_at(self.cam.s(p));
+        if el.is_elbow() {
+            let Some(Handle::Mid(i)) = handle else {
+                return true;
+            };
+            if let Some(e) = self.get_mut(&el.id)
+                && elbow::release_segment(e, i)
+            {
+                e.touch();
+                binding::refresh_arrow(&mut self.elements, &el.id);
+            }
+            self.commit(before);
+            return true;
+        }
+        if handle.is_some() || !geom::hit_test(&el, p, 8.0 / self.cam.zoom) {
+            self.commit(before);
+            return handle.is_some();
+        }
+        // ponto mais perto no segmento mais perto (no referencial da linha)
+        let q = rotate(p, geom::center(&el), -(el.angle as f32));
+        let pts = geom::abs_points(&el);
+        let Some((i, at)) = pts
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| {
+                let ab = w[1] - w[0];
+                let t = ((q - w[0]).dot(ab) / ab.len_sq().max(1e-9)).clamp(0.0, 1.0);
+                (i, w[0] + ab * t)
+            })
+            .min_by(|a, b| (a.1 - q).len().total_cmp(&(b.1 - q).len()))
+        else {
+            return false;
+        };
+        let mut new: Vec<[f64; 2]> = pts.iter().map(|p| [p.x as f64, p.y as f64]).collect();
+        new.insert(i + 1, [at.x as f64, at.y as f64]);
+        if let Some(e) = self.get_mut(&el.id) {
+            e.set_abs_points(&new);
+            e.touch();
+        }
+        self.point_sel = Some((el.id.clone(), [i + 1].into()));
+        self.commit(before);
+        true
+    }
+
+    /// Troca o tipo das setas selecionadas (e das próximas): sharp, round ou elbow.
+    pub fn set_arrow_type(&mut self, t: &'static str) {
+        self.style.arrow_type = t.into();
+        let ids: Vec<String> = self
+            .elements
+            .iter()
+            .filter(|e| e.kind == "arrow" && self.selected.contains(&e.id))
+            .filter(|e| e.arrow_type() != t)
+            .map(|e| e.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let before = self.elements.clone();
+        for id in &ids {
+            if let Some(e) = self.get_mut(id) {
+                if e.is_elbow() != (t == "elbow") {
+                    elbow::set_elbowed(e, t == "elbow");
+                }
+                e.roundness = (t == "round").then(|| serde_json::json!({"type": 2}));
+                e.touch();
+            }
+        }
+        for id in &ids {
+            binding::refresh_arrow(&mut self.elements, id);
+        }
+        self.point_sel = None;
+        self.commit(before);
     }
 
     fn selection_bounds(&self) -> Option<Rect> {
@@ -2381,6 +2617,7 @@ impl App {
                 Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,
                 Some(Handle::Rotate) => CursorIcon::Alias,
                 Some(Handle::Point(_)) => CursorIcon::PointingHand,
+                Some(Handle::Mid(i)) => self.mid_cursor(i),
                 None if self.element_at(wp).is_some() => CursorIcon::Move,
                 None => CursorIcon::Default,
             },
@@ -2402,17 +2639,48 @@ impl App {
             Tool::Select => {
                 if let Some(h) = self.handle_at(screen) {
                     let orig = self.single_selected().unwrap().clone();
-                    self.drag = if h == Handle::Rotate {
-                        Drag::Rotate { orig, before }
-                    } else {
-                        Drag::Resize {
+                    self.drag = match h {
+                        Handle::Rotate => Drag::Rotate { orig, before },
+                        Handle::Point(i) => {
+                            let Some(indices) = self.press_point(&orig, i, mods.shift) else {
+                                return;
+                            };
+                            Drag::Points {
+                                orig,
+                                indices,
+                                start: p,
+                                before,
+                                inserted: false,
+                            }
+                        }
+                        Handle::Mid(i) if orig.is_elbow() => Drag::Segment {
+                            orig,
+                            index: i,
+                            before,
+                        },
+                        Handle::Mid(i) => {
+                            let el = insert_point(&orig, i);
+                            if let Some(e) = self.get_mut(&orig.id) {
+                                *e = el.clone();
+                            }
+                            self.point_sel = Some((orig.id.clone(), [i + 1].into()));
+                            Drag::Points {
+                                orig: el,
+                                indices: vec![i + 1],
+                                start: p,
+                                before,
+                                inserted: true,
+                            }
+                        }
+                        _ => Drag::Resize {
                             handle: h,
                             orig,
                             before,
-                        }
+                        },
                     };
                     return;
                 }
+                self.point_sel = None;
                 let in_sel_box = self.selected.len() > 1
                     && self
                         .selection_bounds()
@@ -2502,6 +2770,11 @@ impl App {
             }
             Tool::Rect | Tool::Diamond | Tool::Ellipse | Tool::Arrow | Tool::Line | Tool::Frame => {
                 if let Drag::LinearMulti { id, .. } = &self.drag {
+                    // seta em cotovelo: o segundo clique termina
+                    if self.elements.iter().any(|e| e.id == *id && e.is_elbow()) {
+                        self.finish_linear();
+                        return;
+                    }
                     // adiciona um ponto
                     let id = id.clone();
                     if let Some(el) = self.get_mut(&id) {
@@ -2570,6 +2843,9 @@ impl App {
     }
 
     fn on_double_click(&mut self, p: P) {
+        if self.double_click_linear(p) {
+            return;
+        }
         match self.element_at(p) {
             Some(i) if self.elements[i].kind == "text" => {
                 let id = self.elements[i].id.clone();
@@ -2685,9 +2961,16 @@ impl App {
                     }
                     let n = pts.len();
                     pts[n - 1] = [q.x as f64 - el.x, q.y as f64 - el.y];
+                    if el.is_elbow() {
+                        // em cotovelo, refaz a rota do início até o ponteiro
+                        pts = vec![pts[0], pts[n - 1]];
+                    }
                     el.set_points(pts);
                     el.touch();
                     let arrow = el.kind == "arrow";
+                    if el.is_elbow() {
+                        binding::refresh_arrow(&mut self.elements, &id);
+                    }
                     self.bind_hint = (arrow && !mods.command)
                         .then(|| binding::candidate(&self.elements, q, zoom, &id))
                         .flatten();
@@ -2848,6 +3131,73 @@ impl App {
                 }
                 self.sync_bindings();
             }
+            Drag::Points {
+                orig,
+                indices,
+                start,
+                ..
+            } => {
+                let (orig, indices, start) = (orig.clone(), indices.clone(), *start);
+                let c0 = geom::center(&orig);
+                let a = orig.angle as f32;
+                let local = |w: P| rotate(w, c0, -a);
+                let mut pts = geom::abs_points(&orig);
+                let n = pts.len();
+                if let [i] = indices[..] {
+                    let mut q = local(p);
+                    if mods.shift && n > 1 {
+                        // Shift: ângulo em passos de 15° a partir do vizinho
+                        q = snap_angle(pts[if i == 0 { 1 } else { i - 1 }], q);
+                    } else if g && a == 0.0 {
+                        q = P::new(snap(q.x, true), snap(q.y, true));
+                    }
+                    pts[i] = q;
+                } else {
+                    let d = local(p) - local(start);
+                    for &i in &indices {
+                        pts[i] = pts[i] + d;
+                    }
+                }
+                let mut el = orig.clone();
+                el.set_abs_points(
+                    &pts.iter()
+                        .map(|p| [p.x as f64, p.y as f64])
+                        .collect::<Vec<_>>(),
+                );
+                el.touch();
+                let ends: Vec<(bool, P)> = if el.kind == "arrow" {
+                    let (c, pts) = (geom::center(&el), geom::abs_points(&el));
+                    indices
+                        .iter()
+                        .filter(|&&i| i == 0 || i + 1 == n)
+                        .map(|&i| (i != 0, rotate(pts[i], c, a)))
+                        .collect()
+                } else {
+                    vec![]
+                };
+                let id = el.id.clone();
+                if let Some(e) = self.get_mut(&id) {
+                    *e = el;
+                }
+                // as pontas da seta ligam (ou soltam) onde pararem
+                for (end, q) in ends {
+                    self.bind_end_at(&id, end, q, mods);
+                }
+                if self.elements.iter().any(|e| e.id == id && e.is_elbow()) {
+                    binding::refresh_arrow(&mut self.elements, &id);
+                }
+                self.sync_bindings();
+            }
+            Drag::Segment { orig, index, .. } => {
+                let mut el = orig.clone();
+                let q = P::new(snap(p.x, g), snap(p.y, g));
+                elbow::drag_segment(&mut el, *index, q);
+                el.touch();
+                let id = el.id.clone();
+                if let Some(e) = self.get_mut(&id) {
+                    *e = el;
+                }
+            }
             Drag::Erase { last, marked } => {
                 let a = *last;
                 *last = p;
@@ -2938,7 +3288,18 @@ impl App {
                 }
                 self.commit(before);
             }
-            Drag::Rotate { before, .. } => self.commit(before),
+            Drag::Points {
+                before,
+                inserted: true,
+                start,
+                ..
+            } if (p - start).len() * self.cam.zoom < 3.0 => {
+                self.elements = before;
+                self.point_sel = None;
+            }
+            Drag::Rotate { before, .. }
+            | Drag::Points { before, .. }
+            | Drag::Segment { before, .. } => self.commit(before),
             Drag::Erase { marked, .. } => {
                 if !marked.is_empty() {
                     let before = self.elements.clone();
@@ -3161,12 +3522,14 @@ impl App {
                 self.align_selected(dx, dy);
             }
         }
-        if k(n, Key::Delete) || k(n, Key::Backspace) {
+        if (k(n, Key::Delete) || k(n, Key::Backspace)) && !self.delete_points() {
             self.delete_selected();
         }
         if k(n, Key::Escape) {
             if matches!(self.drag, Drag::LinearMulti { .. }) {
                 self.finish_linear();
+            } else if self.valid_point_sel().is_some() {
+                self.point_sel = None;
             } else {
                 self.selected.clear();
                 self.show_menu = false;
@@ -3474,11 +3837,23 @@ impl App {
             } else {
                 Color32::WHITE
             };
+            let point_sel = self.valid_point_sel().cloned().unwrap_or_default();
             for (h, p) in self.handles() {
                 let s = self.cam.s(p);
                 match h {
+                    Handle::Point(i) if point_sel.contains(&i) => {
+                        painter.circle(s, HANDLE_PX / 2.0 + 1.5, SELECTION, sel_stroke);
+                    }
                     Handle::Rotate | Handle::Point(_) => {
                         painter.circle(s, HANDLE_PX / 2.0 + 1.0, handle_fill, sel_stroke);
+                    }
+                    Handle::Mid(_) => {
+                        painter.circle(
+                            s,
+                            HANDLE_PX / 2.0 - 0.5,
+                            handle_fill.gamma_multiply(0.7),
+                            Stroke::new(1.0, SELECTION.gamma_multiply(0.6)),
+                        );
                     }
                     _ => {
                         let r =
@@ -3676,6 +4051,7 @@ fn flip(e: &mut Element, mid: f64, horizontal: bool) {
             e.y = mid - e.y;
         }
         e.set_points(pts);
+        elbow::mirror_segments(e, horizontal);
     } else if horizontal {
         e.x = mid - e.x - e.width;
     } else {
@@ -3700,6 +4076,25 @@ pub fn file_name(p: &std::path::Path) -> String {
     p.file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+/// Cópia de `orig` com um ponto novo no meio do segmento `i` (na curva, se curva).
+fn insert_point(orig: &Element, i: usize) -> Element {
+    let pts = geom::abs_points(orig);
+    let mut el = orig.clone();
+    if i + 1 >= pts.len() {
+        return el;
+    }
+    let m = if orig.is_round() && pts.len() > 2 {
+        crate::rough::curve_mid(&pts, i)
+    } else {
+        (pts[i] + pts[i + 1]) * 0.5
+    };
+    let mut rel = orig.points();
+    rel.insert(i + 1, [m.x as f64 - orig.x, m.y as f64 - orig.y]);
+    el.set_points(rel);
+    el.touch();
+    el
 }
 
 fn snap_angle(origin: P, p: P) -> P {
@@ -3893,6 +4288,42 @@ mod tests {
         let r = resize(&e, Handle::SE, target, false, false);
         let after = geom::corners(&r)[0];
         assert!((before - after).len() < 0.01, "{before:?} vs {after:?}");
+    }
+
+    #[test]
+    fn insert_point_in_the_middle() {
+        let mut e = Element::new("line", 10.0, 10.0, &Style::default());
+        e.roundness = None;
+        e.set_points(vec![[0.0, 0.0], [100.0, 0.0]]);
+        let r = insert_point(&e, 0);
+        assert_eq!(r.points(), vec![[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]]);
+        // na curva, o ponto novo fica sobre a curva
+        let mut c = Element::new("line", 0.0, 0.0, &Style::default());
+        c.set_points(vec![[0.0, 0.0], [100.0, 100.0], [200.0, 0.0]]);
+        let r = insert_point(&c, 0);
+        let m = r.points()[1];
+        let curve = crate::rough::smooth_through(&geom::abs_points(&c));
+        let d = geom::dist_to_polyline(P::new(m[0] as f32, m[1] as f32), &curve, false);
+        assert!(d < 1.0, "{m:?} a {d} da curva");
+    }
+
+    #[test]
+    fn arrow_type_of_new_arrows() {
+        let mut style = Style::default();
+        let a = Element::new("arrow", 0.0, 0.0, &style);
+        assert_eq!(a.arrow_type(), "round");
+        style.arrow_type = "sharp".into();
+        assert_eq!(
+            Element::new("arrow", 0.0, 0.0, &style).arrow_type(),
+            "sharp"
+        );
+        style.arrow_type = "elbow".into();
+        let e = Element::new("arrow", 0.0, 0.0, &style);
+        assert_eq!(e.arrow_type(), "elbow");
+        assert_eq!(e.roundness, None);
+        assert!(e.extra.contains_key("fixedSegments"));
+        // linhas seguem as bordas, não o tipo de seta
+        assert!(Element::new("line", 0.0, 0.0, &style).is_round());
     }
 
     #[test]

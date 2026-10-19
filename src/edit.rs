@@ -7,6 +7,7 @@
 //! de uma seta em formas pelo id.
 
 use crate::binding::{self, ANCHORS, Binding};
+use crate::elbow;
 use crate::files;
 use crate::fonts::{self, Family};
 use crate::geom;
@@ -189,7 +190,7 @@ pub fn summary(el: &Element, all: &[Element]) -> Value {
     if el.opacity != 100.0 {
         o.insert("opacity".into(), json!(el.opacity));
     }
-    if matches!(el.kind.as_str(), "rectangle" | "diamond" | "line" | "arrow") {
+    if matches!(el.kind.as_str(), "rectangle" | "diamond" | "line") {
         o.insert("rounded".into(), json!(el.is_round()));
     }
     match el.kind.as_str() {
@@ -217,6 +218,7 @@ pub fn summary(el: &Element, all: &[Element]) -> Value {
                 o.insert("endArrowhead".into(), json!(el.arrowhead(true)));
             }
             if el.kind == "arrow" {
+                o.insert("arrowType".into(), json!(el.arrow_type()));
                 o.insert("start".into(), end_summary(el, false));
                 o.insert("end".into(), end_summary(el, true));
             }
@@ -289,6 +291,14 @@ fn apply_common(el: &mut Element, s: &Spec) -> Result<(), String> {
             (true, "diamond" | "line" | "arrow") => Some(json!({"type": 2})),
             _ => None,
         };
+    }
+    if el.kind == "arrow"
+        && let Some(t) = one_of(s, "arrowType", &["sharp", "round", "elbow"])?
+    {
+        if el.is_elbow() != (t == "elbow") {
+            elbow::set_elbowed(el, t == "elbow");
+        }
+        el.roundness = (t == "round").then(|| json!({"type": 2}));
     }
     if let Some(v) = boolean(s, "locked")? {
         el.locked = v;
@@ -789,6 +799,32 @@ mod tests {
             bound.contains("\"s\"") && bound.contains("\"text\""),
             "{bound}"
         );
+    }
+
+    #[test]
+    fn elbow_arrow_routes_and_follows_shapes() {
+        let mut els = scene();
+        update(&mut els, &[json!({"id": "s", "arrowType": "elbow"})]).unwrap();
+        update(&mut els, &[json!({"id": "b", "y": 200})]).unwrap();
+        let s = els.iter().find(|e| e.id == "s").unwrap();
+        assert_eq!(summary(s, &els)["arrowType"], json!("elbow"));
+        let pts = geom::abs_points(s);
+        assert!(pts.len() >= 3, "dobra para descer até a elipse: {pts:?}");
+        assert!(
+            pts.windows(2)
+                .all(|w| (w[0].x - w[1].x).abs() < 0.01 || (w[0].y - w[1].y).abs() < 0.01),
+            "{pts:?}"
+        );
+        // termina no lado esquerdo da elipse (300, 230), chegando da esquerda
+        let end = *pts.last().unwrap();
+        assert!(
+            (end.x - 295.0).abs() < 0.5 && (end.y - 230.0).abs() < 0.5,
+            "{pts:?}"
+        );
+        update(&mut els, &[json!({"id": "s", "arrowType": "sharp"})]).unwrap();
+        let s = els.iter().find(|e| e.id == "s").unwrap();
+        assert_eq!(s.points().len(), 2);
+        assert_eq!(summary(s, &els)["arrowType"], json!("sharp"));
     }
 
     #[test]

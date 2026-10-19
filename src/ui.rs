@@ -402,6 +402,38 @@ fn line_icon(
     }
 }
 
+/// Ícones do seletor de tipo de seta (afiada, curva, cotovelo).
+fn arrow_type_icon(p: &Painter, b: Rect, col: Color32, kind: &str) {
+    let s = Stroke::new(1.6, col);
+    let (a, z) = (b.left_bottom(), b.right_top());
+    let pts = match kind {
+        "sharp" => vec![a, pos2(b.left() + b.width() * 0.45, b.top()), z],
+        "round" => (0..=12)
+            .map(|i| {
+                let t = i as f32 / 12.0;
+                let c = pos2(b.left() + b.width() * 0.2, b.top());
+                let u = 1.0 - t;
+                pos2(
+                    u * u * a.x + 2.0 * u * t * c.x + t * t * z.x,
+                    u * u * a.y + 2.0 * u * t * c.y + t * t * z.y,
+                )
+            })
+            .collect(),
+        _ => {
+            let mx = b.center().x;
+            vec![a, pos2(mx, a.y), pos2(mx, z.y), z]
+        }
+    };
+    p.add(Shape::line(pts.clone(), s));
+    // ponta no fim
+    let n = pts.len();
+    let dir = (pts[n - 1] - pts[n - 2]).normalized();
+    let back = pts[n - 1] - dir * 5.0;
+    let side = vec2(-dir.y, dir.x) * 3.5;
+    p.line_segment([pts[n - 1], back + side], s);
+    p.line_segment([pts[n - 1], back - side], s);
+}
+
 fn props_panel(app: &mut App, ctx: &egui::Context) {
     let sel_kinds: Vec<String> = app
         .elements
@@ -559,7 +591,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                         }
                     });
                 }
-                if has(&["rectangle", "diamond", "line", "arrow"]) {
+                if has(&["rectangle", "diamond", "line"]) {
                     section(ui, "Bordas");
                     let cur = current_value(app, |e| e.is_round()).unwrap_or(app.style.round);
                     ui.horizontal(|ui| {
@@ -589,6 +621,10 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                             {
                                 app.style.round = val;
                                 app.apply_prop("round", move |e| {
+                                    // setas usam o tipo de seta
+                                    if e.kind == "arrow" {
+                                        return;
+                                    }
                                     e.roundness = if !val {
                                         None
                                     } else if e.kind == "rectangle" {
@@ -602,6 +638,28 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                     });
                 }
                 if has(&["arrow"]) {
+                    section(ui, "Tipo de seta");
+                    let cur = app
+                        .elements
+                        .iter()
+                        .find(|e| e.kind == "arrow" && app.selected.contains(&e.id))
+                        .map(|e| e.arrow_type().to_string())
+                        .unwrap_or_else(|| app.style.arrow_type.clone());
+                    ui.horizontal(|ui| {
+                        for (val, tip) in [
+                            ("sharp", "Afiada"),
+                            ("round", "Curva"),
+                            ("elbow", "Cotovelo"),
+                        ] {
+                            if icon_button(ui, cur == val, 30.0, tip, |p, r, col| {
+                                arrow_type_icon(p, r.shrink(7.0), col, val)
+                            })
+                            .clicked()
+                            {
+                                app.set_arrow_type(val);
+                            }
+                        }
+                    });
                     section(ui, "Pontas de seta");
                     for end in [false, true] {
                         let cur = current_value(app, |e| e.arrowhead(end)).unwrap_or_else(|| {
@@ -1680,6 +1738,10 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Diminuir / aumentar fonte", "Ctrl+Shift+< / >"),
                     ("Mover 1px / 5px", "Setas / Shift+setas"),
                     ("Seta sem grudar na forma", "Ctrl+arrastar"),
+                    ("Linha: adicionar ponto", "Arrastar o meio · duplo clique"),
+                    ("Linha: selecionar pontos", "Clique · Shift+clique"),
+                    ("Linha: apagar pontos", "Delete"),
+                    ("Cotovelo: soltar segmento", "Duplo clique no meio"),
                     ("Encaixe: inverter enquanto arrasta", "Ctrl+arrastar"),
                     ("Salvar / Salvar como / Abrir", "Ctrl+S / Ctrl+Shift+S / Ctrl+O"),
                     ("Exportar imagem", "Ctrl+Shift+E"),

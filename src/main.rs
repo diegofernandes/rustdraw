@@ -10,6 +10,7 @@
 mod app;
 mod binding;
 mod edit;
+mod elbow;
 mod export;
 mod files;
 mod fonts;

@@ -180,6 +180,21 @@ pub fn smooth_through(pts: &[P]) -> Vec<P> {
     out
 }
 
+/// Ponto no meio do trecho `i` (de `pts[i]` a `pts[i + 1]`) da curva de [`smooth_through`].
+pub fn curve_mid(pts: &[P], i: usize) -> P {
+    let n = pts.len();
+    if n < 3 {
+        return (pts[i] + pts[i + 1]) * 0.5;
+    }
+    let at = |k: isize| pts[k.clamp(0, n as isize - 1) as usize];
+    let k = i as isize;
+    let b0 = pts[i];
+    let b1 = pts[i] + (pts[i + 1] - at(k - 1)) * (1.0 / 6.0);
+    let b2 = pts[i + 1] - (at(k + 2) - pts[i]) * (1.0 / 6.0);
+    let b3 = pts[i + 1];
+    (b0 + b1 * 3.0 + b2 * 3.0 + b3) * 0.125
+}
+
 /// Curva irregular passando pelos pontos, com duas passadas.
 pub fn curve(pts: &[P], o: &Opts, rng: &mut Rng) -> Vec<Vec<P>> {
     let passes = if o.multi { 2 } else { 1 };

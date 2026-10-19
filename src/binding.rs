@@ -30,6 +30,10 @@ pub struct Binding {
     /// Ponto fixo como fração da caixa da forma; `None` = modo livre.
     pub fixed: Option<[f64; 2]>,
     pub gap: f64,
+    /// Modo livre de setas em cotovelo: o lado escolhido na última rota. Vai
+    /// para o arquivo como `fixedPoint` com `mode: "orbit"`, para o Excalidraw
+    /// (que exige um ponto fixo nessas setas) abrir no mesmo lado.
+    pub side: Option<[f64; 2]>,
 }
 
 impl Binding {
@@ -38,6 +42,7 @@ impl Binding {
             element_id: element_id.into(),
             fixed,
             gap: GAP,
+            side: None,
         }
     }
 
@@ -50,7 +55,11 @@ impl Binding {
         // Excalidraw recente: `mode` "orbit" mira o centro mesmo com `fixedPoint`;
         // "inside" prende a ponta exatamente no ponto, sem folga.
         let mode = v.get("mode").and_then(|m| m.as_str());
-        let fixed = if mode == Some("orbit") { None } else { fixed };
+        let (fixed, side) = if mode == Some("orbit") {
+            (None, fixed)
+        } else {
+            (fixed, None)
+        };
         let gap = if mode == Some("inside") {
             0.0
         } else {
@@ -60,16 +69,21 @@ impl Binding {
             element_id,
             fixed,
             gap,
+            side,
         })
     }
 
     pub fn to_value(&self) -> Value {
-        json!({
+        let mut v = json!({
             "elementId": self.element_id,
             "focus": 0.0,
             "gap": self.gap,
-            "fixedPoint": self.fixed.map(|f| json!([f[0], f[1]])),
-        })
+            "fixedPoint": self.fixed.or(self.side).map(|f| json!([f[0], f[1]])),
+        });
+        if self.fixed.is_none() && self.side.is_some() {
+            v["mode"] = json!("orbit");
+        }
+        v
     }
 }
 
@@ -239,6 +253,14 @@ pub fn updated_arrow<'a>(
     let pts = world_points(arrow);
     if pts.len() < 2 {
         return None;
+    }
+    if arrow.is_elbow() {
+        let el = crate::elbow::rerouted(arrow, &find);
+        let same = el.x == arrow.x
+            && el.y == arrow.y
+            && el.points() == arrow.points()
+            && el.extra == arrow.extra;
+        return (!same).then_some(el);
     }
     let resolve = |end: bool| {
         let b = get(arrow, end)?;
@@ -434,7 +456,9 @@ mod tests {
         let o = Binding::from_value(&old).unwrap();
         assert_eq!((o.fixed, o.gap), (None, 8.0));
         let orbit = json!({"elementId": "x", "fixedPoint": [0.3, 0.1], "mode": "orbit"});
-        assert_eq!(Binding::from_value(&orbit).unwrap().fixed, None);
+        let o = Binding::from_value(&orbit).unwrap();
+        assert_eq!((o.fixed, o.side), (None, Some([0.3, 0.1])));
+        assert_eq!(Binding::from_value(&o.to_value()), Some(o));
         let inside = json!({"elementId": "x", "fixedPoint": [0.3, 0.1], "mode": "inside"});
         let i = Binding::from_value(&inside).unwrap();
         assert_eq!((i.fixed, i.gap), (Some([0.3, 0.1]), 0.0));
