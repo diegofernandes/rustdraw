@@ -14,6 +14,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Menu do botão direito**: como no Excalidraw, um menu para o canvas vazio (colar, copiar como PNG/SVG, selecionar tudo, destravar tudo, grade, modo zen, visualização, estatísticas) e outro para elementos (recortar, copiar, colar, estilos, agrupar, camadas, inverter, duplicar, travar, apagar), com os atalhos ao lado de cada item
 - **Setas que grudam nas formas**: a ponta da seta liga num retângulo, losango, elipse ou texto e acompanha a forma quando ela é movida, redimensionada ou girada. Perto do meio de um lado, encaixa nesse **ponto fixo**; no resto da forma fica **livre**, mirando o centro e parando no contorno. Segure `Ctrl` (`Cmd` no macOS) ao arrastar para não grudar; mover só a seta a solta
 - **Frames**: áreas nomeadas (ferramenta `F`) para montar várias telas ou slides num desenho só. O que fica dentro do frame é recortado pela borda dele e anda junto quando ele é movido; arrastar um elemento para dentro ou para fora de um frame o coloca ou tira dele. Duplo clique no nome (ou `Enter` com o frame selecionado) renomeia. Apagar ou duplicar o frame leva o conteúdo junto. Para exportar um frame sozinho, selecione-o e use "Exportar frame…" no botão direito (ou marque "Somente o frame selecionado" na exportação): sai só o conteúdo, do tamanho exato do frame
+- **Biblioteca de formas**: guarde formas e grupos para reutilizar (botão **Biblioteca** no canto superior direito, `+` ou "Adicionar à biblioteca" no botão direito). Clique num item para inserir no centro da tela ou arraste para posicionar; `Shift+clique` marca itens para exportar ou remover. Importa e exporta arquivos `.excalidrawlib` (versões 1 e 2) — dá para usar bibliotecas baixadas do Excalidraw sem depender do site. A biblioteca fica salva localmente no diretório de dados do usuário
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
 - **Conforto**: tema escuro, grade com encaixe, zoom no cursor, salvamento automático (o desenho volta ao reabrir), arrastar arquivo para a janela
@@ -122,6 +123,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/render.rs` | Desenho das primitivas no canvas (egui) |
 | `src/export.rs` | PNG (tiny-skia + fontdue) e SVG |
 | `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, histórico, arquivos |
+| `src/library.rs` | Biblioteca de formas no formato `.excalidrawlib` |
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |
 | `src/frame.rs` | Frames: quem está dentro de qual, recorte, nomes |
 | `src/fonts.rs` | Fontes embutidas |

@@ -15,6 +15,7 @@ mod files;
 mod fonts;
 mod frame;
 mod geom;
+mod library;
 mod mcp;
 mod model;
 mod render;
