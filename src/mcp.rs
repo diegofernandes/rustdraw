@@ -341,6 +341,7 @@ fn element_schema(creating: bool) -> Value {
         "roughness": {"type": "number", "description": "0 arquiteto, 1 artista (padrão), 2 cartunista."},
         "opacity": {"type": "number", "description": "0 a 100."},
         "rounded": {"type": "boolean", "description": "Cantos arredondados (padrão true)."},
+        "arrowType": {"type": "string", "enum": ["sharp", "round", "elbow"], "description": "Setas: sharp (reta), round (curva, padrão) ou elbow (cotovelo: só segmentos horizontais e verticais, contornando as formas ligadas)."},
         "locked": {"type": "boolean"},
         "link": {"type": ["string", "null"]},
         "groupIds": {"type": "array", "items": {"type": "string"}}

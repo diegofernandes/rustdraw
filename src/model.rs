@@ -151,6 +151,8 @@ pub struct Style {
     pub font_size: f64,
     pub font_family: i64,
     pub round: bool,
+    /// Tipo das setas novas: "sharp", "round" ou "elbow" (`currentItemArrowType`).
+    pub arrow_type: String,
     pub start_arrowhead: Option<String>,
     pub end_arrowhead: Option<String>,
 }
@@ -168,6 +170,7 @@ impl Default for Style {
             font_size: 20.0,
             font_family: 1,
             round: true,
+            arrow_type: "round".into(),
             start_arrowhead: None,
             end_arrowhead: Some("arrow".into()),
         }
@@ -194,7 +197,13 @@ impl Element {
                 extra.insert("startArrowhead".into(), opt_str(sa));
                 extra.insert("endArrowhead".into(), opt_str(ea));
                 if kind == "arrow" {
-                    extra.insert("elbowed".into(), Value::Bool(false));
+                    let elbow = style.arrow_type == "elbow";
+                    extra.insert("elbowed".into(), Value::Bool(elbow));
+                    if elbow {
+                        extra.insert("fixedSegments".into(), Value::Null);
+                        extra.insert("startIsSpecial".into(), Value::Null);
+                        extra.insert("endIsSpecial".into(), Value::Null);
+                    }
                 }
             }
             "freedraw" => {
@@ -225,14 +234,11 @@ impl Element {
             }
             _ => {}
         }
-        let roundness = if style.round {
-            match kind {
-                "rectangle" => Some(json!({"type": 3})),
-                "diamond" | "line" | "arrow" => Some(json!({"type": 2})),
-                _ => None,
-            }
-        } else {
-            None
+        let roundness = match kind {
+            "arrow" => (style.arrow_type == "round").then(|| json!({"type": 2})),
+            "rectangle" if style.round => Some(json!({"type": 3})),
+            "diamond" | "line" if style.round => Some(json!({"type": 2})),
+            _ => None,
         };
         let is_text = kind == "text";
         if kind == "frame" {
@@ -406,7 +412,56 @@ impl Element {
     }
 
     pub fn is_round(&self) -> bool {
-        self.roundness.as_ref().is_some_and(|v| !v.is_null())
+        self.roundness.as_ref().is_some_and(|v| !v.is_null()) && !self.is_elbow()
+    }
+
+    /// Seta em cotovelo (só segmentos horizontais e verticais).
+    pub fn is_elbow(&self) -> bool {
+        self.kind == "arrow" && self.extra.get("elbowed").and_then(|v| v.as_bool()) == Some(true)
+    }
+
+    /// Tipo da seta, como no seletor do Excalidraw: "sharp", "round" ou "elbow".
+    pub fn arrow_type(&self) -> &'static str {
+        if self.is_elbow() {
+            "elbow"
+        } else if self.is_round() {
+            "round"
+        } else {
+            "sharp"
+        }
+    }
+
+    /// Define os pontos em coordenadas absolutas (sem rotação): (x, y) passa a
+    /// ser o primeiro ponto. Os segmentos fixos de setas em cotovelo, guardados
+    /// relativos a (x, y), continuam no mesmo lugar.
+    pub fn set_abs_points(&mut self, pts: &[[f64; 2]]) {
+        let Some(first) = pts.first().copied() else {
+            return;
+        };
+        let (dx, dy) = (first[0] - self.x, first[1] - self.y);
+        if (dx != 0.0 || dy != 0.0)
+            && let Some(Value::Array(segs)) = self.extra.get_mut("fixedSegments")
+        {
+            for seg in segs.iter_mut() {
+                for k in ["start", "end"] {
+                    if let Some(Value::Array(p)) = seg.get_mut(k)
+                        && let (Some(x), Some(y)) = (
+                            p.first().and_then(|v| v.as_f64()),
+                            p.get(1).and_then(|v| v.as_f64()),
+                        )
+                    {
+                        *p = vec![json!(x - dx), json!(y - dy)];
+                    }
+                }
+            }
+        }
+        self.x = first[0];
+        self.y = first[1];
+        self.set_points(
+            pts.iter()
+                .map(|p| [p[0] - first[0], p[1] - first[1]])
+                .collect(),
+        );
     }
 }
 
