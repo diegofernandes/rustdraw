@@ -6,6 +6,7 @@ use crate::export::{self, ExportOpts};
 use crate::files;
 use crate::frame;
 use crate::geom::{self, P, Prim, Rect, rotate};
+use crate::label;
 use crate::library::{self, LibraryItem};
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
 use crate::render::{self, Cam, PaintCtx};
@@ -524,8 +525,10 @@ impl App {
         self.mark_changed();
     }
 
-    /// Faz as setas ligadas acompanharem as formas que mudaram.
+    /// Faz os textos dentro das formas e as setas ligadas acompanharem as
+    /// formas que mudaram.
     pub fn sync_bindings(&mut self) {
+        label::sync(&mut self.elements);
         binding::sync(&mut self.elements, &mut self.bind_seen);
     }
 
@@ -1419,9 +1422,13 @@ impl App {
                 if let Some(new) = e.frame_id.as_ref().and_then(|f| ids.get(f.as_str())) {
                     n.frame_id = Some(new.clone());
                 }
+                // o texto dentro de uma forma só continua nela se a forma foi copiada
                 if n.extra.contains_key("containerId") {
-                    n.extra
-                        .insert("containerId".into(), serde_json::Value::Null);
+                    let c = label::container_id(e).and_then(|c| ids.get(c));
+                    n.extra.insert(
+                        "containerId".into(),
+                        c.map_or(serde_json::Value::Null, |c| serde_json::json!(c)),
+                    );
                 }
                 // ligações só sobrevivem se a forma também foi copiada
                 for end in [false, true] {
@@ -2098,6 +2105,35 @@ impl App {
         });
     }
 
+    /// Edita o texto `i` ou, numa forma, o texto dentro dela (criando-o se
+    /// ainda não existir).
+    fn edit_text_at(&mut self, i: usize) {
+        let el = &self.elements[i];
+        if el.kind == "text" {
+            let id = el.id.clone();
+            return self.edit_text(&id);
+        }
+        if let Some(t) = label::label_of(&self.elements, &el.id) {
+            let id = self.elements[t].id.clone();
+            return self.edit_text(&id);
+        }
+        let (container, frame_id) = (el.id.clone(), el.frame_id.clone());
+        let c = geom::center(el);
+        self.start_text(c, Some(c.x as f64));
+        let Some(ed) = &self.editing else { return };
+        let t = self.elements.iter().position(|e| e.id == ed.id).unwrap();
+        let ci = self
+            .elements
+            .iter()
+            .position(|e| e.id == container)
+            .unwrap();
+        let mut text = self.elements.remove(t);
+        text.frame_id = frame_id;
+        label::attach(&mut text, &mut self.elements[ci]);
+        // logo acima da forma, para não ficar atrás de quem está por cima dela
+        self.elements.insert(ci + 1, text);
+    }
+
     pub fn edit_text(&mut self, id: &str) {
         let Some(el) = self.elements.iter().find(|e| e.id == id) else {
             return;
@@ -2118,8 +2154,15 @@ impl App {
             return;
         };
         if ed.buf.trim().is_empty() {
-            self.elements.retain(|e| e.id != ed.id);
-            self.selected.remove(&ed.id);
+            if ed.before.iter().all(|e| e.id != ed.id) {
+                // texto novo que ficou vazio: nada muda (nem a forma que o conteria)
+                let sel: Vec<String> = self.selected.iter().cloned().collect();
+                self.elements = ed.before.clone();
+                self.selected = sel.into_iter().filter(|s| *s != ed.id).collect();
+            } else {
+                self.elements.retain(|e| e.id != ed.id);
+                self.selected.remove(&ed.id);
+            }
         }
         self.commit(ed.before);
         if !self.tool_locked && self.tool == Tool::Text {
@@ -2323,12 +2366,22 @@ impl App {
     // Hit-test e alças
     // ------------------------------------------------------------------
 
+    /// Elemento sob `p`; o texto dentro de uma forma conta como a forma.
     fn element_at(&self, p: P) -> Option<usize> {
         let tol = 8.0 / self.cam.zoom;
-        (0..self.elements.len()).rev().find(|&i| {
-            let e = &self.elements[i];
-            geom::hit_test(e, p, tol) && frame::visible_at(&self.elements, e, p)
-        })
+        (0..self.elements.len())
+            .rev()
+            .find(|&i| {
+                let e = &self.elements[i];
+                geom::hit_test(e, p, tol) && frame::visible_at(&self.elements, e, p)
+            })
+            .map(|i| label::container_of(&self.elements, i).unwrap_or(i))
+    }
+
+    /// Forma com `p` por dentro (mesmo sem fundo), visível em `p`.
+    fn container_at(&self, p: P) -> Option<usize> {
+        label::container_at(&self.elements, p)
+            .filter(|&i| frame::visible_at(&self.elements, &self.elements[i], p))
     }
 
     fn group_of(&self, i: usize) -> HashSet<String> {
@@ -2974,9 +3027,9 @@ impl App {
                 if let Some(i) = self
                     .element_at(p)
                     .filter(|&i| self.elements[i].kind == "text")
+                    .or_else(|| self.container_at(p))
                 {
-                    let id = self.elements[i].id.clone();
-                    self.edit_text(&id);
+                    self.edit_text_at(i);
                 } else {
                     self.start_text(P::new(snap(p.x, g), p.y), None);
                 }
@@ -3006,20 +3059,17 @@ impl App {
                 let id = self.elements[i].id.clone();
                 self.rename_frame(&id);
             }
-            Some(i)
-                if matches!(
-                    self.elements[i].kind.as_str(),
-                    "rectangle" | "ellipse" | "diamond"
-                ) =>
-            {
-                let c = geom::center(&self.elements[i]);
+            Some(i) if label::can_contain(&self.elements[i]) => {
                 self.drag = Drag::None;
-                self.start_text(c, Some(c.x as f64));
+                self.edit_text_at(i);
             }
             Some(_) => {}
             None => {
                 self.drag = Drag::None;
-                self.start_text(p, None);
+                match self.container_at(p) {
+                    Some(i) => self.edit_text_at(i),
+                    None => self.start_text(p, None),
+                }
             }
         }
     }
@@ -3210,6 +3260,20 @@ impl App {
                         sel.insert(e.id.clone());
                     }
                 }
+                // o texto dentro de uma forma só é selecionado junto com ela
+                let owners: HashMap<&str, &str> = self
+                    .elements
+                    .iter()
+                    .filter_map(|e| label::container_id(e).map(|c| (e.id.as_str(), c)))
+                    .collect();
+                let orphans: Vec<String> = sel
+                    .iter()
+                    .filter(|id| owners.get(id.as_str()).is_some_and(|c| !sel.contains(*c)))
+                    .cloned()
+                    .collect();
+                for id in orphans {
+                    sel.remove(&id);
+                }
                 // um frame selecionado leva os filhos junto; não precisam ficar na seleção
                 let frames: HashSet<&String> = self
                     .elements
@@ -3355,7 +3419,7 @@ impl App {
                 let mut hits = Vec::new();
                 for (i, e) in self.elements.iter().enumerate() {
                     if !marked.contains(&e.id) && geom::segment_hits(e, a, p, tol) {
-                        hits.push(i);
+                        hits.push(label::container_of(&self.elements, i).unwrap_or(i));
                     }
                 }
                 for i in hits {
@@ -4521,6 +4585,25 @@ mod tests {
         // copiar só o filho mantém o frame de origem
         let alone = App::clone_with_new_ids(&[inside], P::new(10.0, 10.0));
         assert_eq!(alone[0].frame_id.as_ref(), Some(&f.id));
+    }
+
+    #[test]
+    fn copies_of_a_shape_take_their_label() {
+        let s = Style::default();
+        let mut r = Element::new("rectangle", 0.0, 0.0, &s);
+        let mut t = Element::new("text", 0.0, 0.0, &s);
+        label::attach(&mut t, &mut r);
+        let copies = App::clone_with_new_ids(&[r.clone(), t.clone()], P::new(10.0, 10.0));
+        assert_eq!(label::container_id(&copies[1]), Some(copies[0].id.as_str()));
+        // copiar só o texto: vira texto solto
+        let alone = App::clone_with_new_ids(&[t], P::new(10.0, 10.0));
+        assert_eq!(label::container_id(&alone[0]), None);
+        // apagar ou copiar a forma leva o texto junto
+        let els = vec![r.clone(), copies[1].clone()];
+        let ids = frame::with_children(&els, &[r.id.clone()].into());
+        assert_eq!(ids.len(), 1, "o texto é de outra forma");
+        let ids = frame::with_children(&copies, &[copies[0].id.clone()].into());
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]

@@ -60,7 +60,8 @@ pub fn frame_at(els: &[Element], p: P, skip: &HashSet<String>) -> Option<usize> 
         .find(|&i| is_frame(&els[i]) && !skip.contains(&els[i].id) && rect(&els[i]).contains(p))
 }
 
-/// `ids` mais os filhos dos frames que estão em `ids`.
+/// `ids` mais os filhos dos frames que estão em `ids` (e os textos dentro
+/// das formas).
 pub fn with_children(els: &[Element], ids: &HashSet<String>) -> HashSet<String> {
     let mut out = ids.clone();
     for e in els {
@@ -68,7 +69,7 @@ pub fn with_children(els: &[Element], ids: &HashSet<String>) -> HashSet<String> 
             out.insert(e.id.clone());
         }
     }
-    out
+    crate::label::with_labels(els, &out)
 }
 
 /// O elemento aparece em `p`? Fora da área do frame dele, está recortado.
