@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>RustDraw — licenças de terceiros</title>
+<style>
+body { font-family: sans-serif; max-width: 960px; margin: 2em auto; padding: 0 1em; }
+pre { white-space: pre-wrap; background: #f4f4f4; padding: 1em; }
+</style>
+</head>
+<body>
+<h1>Licenças de terceiros</h1>
+<p>O RustDraw inclui as bibliotecas abaixo. Os avisos de rough.js, Excalidraw e da fonte Virgil estão em THIRD_PARTY_NOTICES.md.</p>
+<h2>Resumo</h2>
+<ul>
+{{#each overview}}
+<li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+{{#each licenses}}
+<h3 id="{{id}}">{{name}}</h3>
+<p>Usada por:</p>
+<ul>
+{{#each used_by}}
+<li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

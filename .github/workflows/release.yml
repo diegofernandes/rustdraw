@@ -81,6 +81,12 @@ jobs:
             cargo build --release --locked --target "$t"
           done
 
+      - name: Licenças de terceiros
+        shell: bash
+        run: |
+          cargo install cargo-about --locked --features cli --version 0.9.2
+          cargo about generate --locked about.hbs -o THIRD_PARTY_LICENSES.html
+
       - name: Empacotar
         shell: bash
         env:
@@ -101,7 +107,8 @@ jobs:
               cp "target/${{ matrix.targets }}/release/rustdraw" "dist/$PKG/"
               ;;
           esac
-          cp README.md assets/fonts/Virgil-LICENSE.md "dist/$PKG/"
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md \
+            THIRD_PARTY_LICENSES.html assets/fonts/Virgil-LICENSE.md "dist/$PKG/"
           cd dist
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             7z a -tzip "$PKG.zip" "$PKG" > /dev/null
