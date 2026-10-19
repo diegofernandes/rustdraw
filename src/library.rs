@@ -122,6 +122,57 @@ pub fn merge(items: &mut Vec<LibraryItem>, incoming: Vec<LibraryItem>) -> usize 
     n
 }
 
+/// Move o item `id` para a posição `to` (índice na lista final).
+pub fn move_item(items: &mut Vec<LibraryItem>, id: &str, to: usize) -> bool {
+    let Some(from) = items.iter().position(|i| i.id == id) else {
+        return false;
+    };
+    let it = items.remove(from);
+    items.insert(to.min(items.len()), it);
+    from != to.min(items.len() - 1)
+}
+
+/// Move o item `id` para logo antes de `before` (que fica depois dele).
+pub fn move_before(items: &mut Vec<LibraryItem>, id: &str, before: &str) -> bool {
+    if id == before {
+        return false;
+    }
+    let Some(from) = items.iter().position(|i| i.id == id) else {
+        return false;
+    };
+    let it = items.remove(from);
+    let to = items
+        .iter()
+        .position(|i| i.id == before)
+        .unwrap_or(items.len());
+    items.insert(to, it);
+    from != to
+}
+
+/// Renomeia; um nome vazio remove o nome.
+pub fn rename(items: &mut [LibraryItem], id: &str, name: &str) -> bool {
+    let Some(it) = items.iter_mut().find(|i| i.id == id) else {
+        return false;
+    };
+    let name = name.trim();
+    let new = (!name.is_empty()).then(|| name.to_string());
+    let changed = it.name != new;
+    it.name = new;
+    changed
+}
+
+/// Troca os elementos de um item (edição no canvas), mantendo id, nome e data.
+pub fn replace_elements(items: &mut [LibraryItem], id: &str, els: Vec<Element>) -> bool {
+    let els = clean(els);
+    match items.iter_mut().find(|i| i.id == id) {
+        Some(it) if !els.is_empty() => {
+            it.elements = els;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Onde a biblioteca pessoal fica salva.
 pub fn path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("rustdraw").join(format!("biblioteca.{EXT}")))
@@ -199,6 +250,46 @@ mod tests {
         assert_eq!(added, 1);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].elements[0].kind, "ellipse");
+    }
+
+    #[test]
+    fn manage_items() {
+        let el = |k: &str| Element::new(k, 0.0, 0.0, &Style::default());
+        let mut items: Vec<LibraryItem> = ["rectangle", "ellipse", "diamond"]
+            .iter()
+            .map(|k| LibraryItem::new(vec![el(k)]))
+            .collect();
+        let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+        let order = |items: &[LibraryItem]| -> Vec<String> {
+            items.iter().map(|i| i.elements[0].kind.clone()).collect()
+        };
+
+        assert!(move_item(&mut items, &ids[0], 99));
+        assert_eq!(order(&items), ["ellipse", "diamond", "rectangle"]);
+        assert!(move_item(&mut items, &ids[0], 0));
+        assert!(!move_item(&mut items, &ids[0], 0));
+        assert!(move_before(&mut items, &ids[2], &ids[1]));
+        assert_eq!(order(&items), ["rectangle", "diamond", "ellipse"]);
+        assert!(!move_before(&mut items, &ids[2], &ids[2]));
+
+        assert!(rename(&mut items, &ids[1], "  Nuvem "));
+        assert_eq!(items[2].name.as_deref(), Some("Nuvem"));
+        assert!(!rename(&mut items, &ids[1], "Nuvem"));
+        assert!(rename(&mut items, &ids[1], " "));
+        assert_eq!(items[2].name, None);
+
+        let created = items[0].created;
+        assert!(replace_elements(
+            &mut items,
+            &ids[0],
+            vec![el("text"), el("arrow")]
+        ));
+        assert_eq!(items[0].elements.len(), 2);
+        assert_eq!(
+            (items[0].id.as_str(), items[0].created),
+            (ids[0].as_str(), created)
+        );
+        assert!(!replace_elements(&mut items, &ids[0], vec![]));
     }
 
     #[test]
