@@ -43,6 +43,16 @@ pub fn save(path: &Path, scene: &SceneFile) -> Result<(), String> {
 /// cima, para uma queda no meio nunca deixar o arquivo pela metade. Um atalho
 /// (symlink) continua atalho, e o arquivo mantém as permissões que tinha.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    write_with(path, data, false)
+}
+
+/// Como [`write_atomic`], mas só o usuário pode ler o arquivo (no Unix, 0600):
+/// é para arquivos com a chave da edição por IA.
+pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
+    write_with(path, data, true)
+}
+
+fn write_with(path: &Path, data: &[u8], private: bool) -> Result<(), String> {
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -53,9 +63,15 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     let tmp = PathBuf::from(tmp);
     let written = (|| {
         let mut f = std::fs::File::create(&tmp)?;
+        // fechado antes de receber a chave
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         f.write_all(data)?;
         f.sync_all()?;
-        if let Ok(m) = std::fs::metadata(&target) {
+        if !private && let Ok(m) = std::fs::metadata(&target) {
             std::fs::set_permissions(&tmp, m.permissions())?;
         }
         std::fs::rename(&tmp, &target)
@@ -926,6 +942,16 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&p).unwrap(), "três");
             let mode = std::fs::metadata(&p).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let key = dir.join("chave.json");
+            std::fs::write(&key, "velho").unwrap();
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_private(&key, b"segredo").unwrap();
+            let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "só o usuário lê a chave");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

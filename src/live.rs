@@ -105,7 +105,7 @@ impl Host {
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        std::fs::write(file, info.to_string()).map_err(|e| format!("{}: {e}", file.display()))?;
+        crate::edit::write_private(file, info.to_string().as_bytes())?;
 
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -319,6 +319,10 @@ fn serve_http(
     let Some(len) = header("content-length").and_then(|l| l.parse::<usize>().ok()) else {
         return fail("411 Length Required", "falta Content-Length");
     };
+    // antes de reservar a memória: um tamanho absurdo derrubaria o editor
+    if len as u64 > MAX_REQUEST {
+        return fail("413 Content Too Large", "pedido grande demais");
+    }
     let mut body = vec![0; len];
     if r.read_exact(&mut body).is_err() {
         return;
@@ -500,6 +504,12 @@ mod tests {
         assert_eq!(call_at(&file, &me, "x", &args), Err(CallError::NotRunning));
 
         let host = Host::start_at(&file, 0, &new_token(), || {}).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "só o usuário lê a chave");
+        }
         let client = {
             let (file, me) = (file.clone(), me.clone());
             std::thread::spawn(move || {
@@ -601,6 +611,29 @@ mod tests {
         let (status, out) = http(port, "POST", &with, list);
         assert_eq!(status, 200);
         assert!(out.contains("add_elements"));
+        assert!(!out.contains("\"file\""), "no editor não há `file`");
+
+        // `file` passaria por fora da aprovação: é recusado sem chegar ao editor
+        let target = dir.join("outro.excalidraw");
+        let body = json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+            "name": "new_scene", "arguments": {"file": target, "overwrite": true}}});
+        let (status, out) = http(port, "POST", &with, &body.to_string());
+        assert_eq!(status, 200);
+        assert!(out.contains("\"isError\":true"), "{out}");
+        assert!(!target.exists());
+        assert!(host.rx.try_recv().is_err());
+
+        // tamanho absurdo é recusado antes de reservar a memória
+        let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        write!(
+            s,
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{with}\
+             Content-Length: 1000000000000\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 413"), "{out}");
 
         // chamada sem `file`: vai para o editor, com o nome do assistente e a sessão
         let call = std::thread::spawn(move || {
