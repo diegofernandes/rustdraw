@@ -14,7 +14,8 @@ use crate::geom;
 use crate::model::{Element, SceneFile, Style, new_id};
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 const KINDS: [&str; 8] = [
     "rectangle",
@@ -33,15 +34,36 @@ pub fn load(path: &Path) -> Result<SceneFile, String> {
     SceneFile::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Grava num arquivo temporário e renomeia, para nunca deixar o arquivo pela metade.
+/// Grava a cena sem nunca deixar o arquivo pela metade (veja [`write_atomic`]).
 pub fn save(path: &Path, scene: &SceneFile) -> Result<(), String> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    write_atomic(path, scene.to_json().as_bytes())
+}
+
+/// Grava num arquivo temporário ao lado, manda para o disco e renomeia por
+/// cima, para uma queda no meio nunca deixar o arquivo pela metade. Um atalho
+/// (symlink) continua atalho, e o arquivo mantém as permissões que tinha.
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(err)?;
     }
-    let mut tmp = path.as_os_str().to_owned();
+    let mut tmp = target.as_os_str().to_owned();
     tmp.push(".tmp");
-    std::fs::write(&tmp, scene.to_json()).map_err(|e| format!("{}: {e}", path.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    let tmp = PathBuf::from(tmp);
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        if let Ok(m) = std::fs::metadata(&target) {
+            std::fs::set_permissions(&tmp, m.permissions())?;
+        }
+        std::fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map_err(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +900,34 @@ mod tests {
         assert_eq!(t.height, 50.0);
         let sum = summary(t, &els);
         assert_eq!(sum["text"], json!("Olá\nmundo"));
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_keeps_links_and_permissions() {
+        let dir = std::env::temp_dir().join(format!("rustdraw-write-{}", new_id()));
+        let p = dir.join("sub").join("d.excalidraw");
+        write_atomic(&p, b"um").unwrap();
+        write_atomic(&p, b"dois").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "dois");
+        assert!(!dir.join("sub").join("d.excalidraw.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let link = dir.join("atalho.excalidraw");
+            std::os::unix::fs::symlink(&p, &link).unwrap();
+            write_atomic(&link, b"tr\xc3\xaas").unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "três");
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

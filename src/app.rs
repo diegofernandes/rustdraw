@@ -157,10 +157,12 @@ pub struct FrameRename {
     pub focus: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pending {
     New,
     Open,
+    /// Abrir este arquivo (arrastado para a janela ou passado ao abrir o app).
+    OpenPath(PathBuf),
     /// Limpar o canvas (Ctrl+Delete).
     Clear,
     /// Esvaziar a biblioteca (ou remover os itens marcados).
@@ -267,6 +269,8 @@ pub struct App {
     /// Diálogo de arquivos aberto, aguardando a escolha do usuário.
     dialog: Option<DialogTask>,
     ctx: egui::Context,
+    /// Onde o desenho e as preferências são guardados automaticamente.
+    autosave: Option<PathBuf>,
     /// Forma (e ponto de encaixe) onde a ponta da seta vai ligar, para destacar.
     pub bind_hint: Option<Candidate>,
     /// Pontos selecionados da linha/seta selecionada (Delete apaga só eles).
@@ -370,6 +374,27 @@ pub fn autosave_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("rustdraw").join("autosave.excalidraw"))
 }
 
+/// Arquivo do desenho guardado no autosave.
+fn saved_path(f: &SceneFile) -> Option<PathBuf> {
+    f.app_state
+        .get("rustdrawFilePath")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+}
+
+/// O autosave tem um desenho com alterações que não estão em arquivo nenhum.
+fn has_unsaved_work(f: &SceneFile) -> bool {
+    !f.elements.is_empty()
+        && f.app_state.get("rustdrawDirty").and_then(|v| v.as_bool()) == Some(true)
+}
+
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Consome uma tecla pressionada com exatamente estes modificadores (Shift e Alt
 /// precisam bater, ao contrário de `consume_key`). Com `physical`, compara a
 /// posição física da tecla.
@@ -392,9 +417,21 @@ fn snap(v: f32, on: bool) -> f32 {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
-        let hand_ok = setup_fonts(&cc.egui_ctx);
-        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let mut app = App {
+        let library = library::path()
+            .filter(|p| p.exists())
+            .and_then(|p| library::load(&p).ok())
+            .unwrap_or_default();
+        let mut app = Self::empty(cc.egui_ctx.clone(), autosave_path(), library);
+        app.start(open);
+        app
+    }
+
+    /// Editor vazio, sem ler nada do disco. `autosave` é onde ele grava o
+    /// desenho e as preferências.
+    fn empty(ctx: egui::Context, autosave: Option<PathBuf>, library: Vec<LibraryItem>) -> Self {
+        let hand_ok = setup_fonts(&ctx);
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        App {
             elements: vec![],
             files: Map::new(),
             textures: HashMap::new(),
@@ -457,7 +494,8 @@ impl App {
             needs_measure: HashSet::new(),
             last_prefs: None,
             dialog: None,
-            ctx: cc.egui_ctx.clone(),
+            ctx,
+            autosave,
             bind_hint: None,
             point_sel: None,
             bind_seen: HashMap::new(),
@@ -465,10 +503,7 @@ impl App {
             frame_labels: vec![],
             renaming: None,
             frame_hint: None,
-            library: library::path()
-                .filter(|p| p.exists())
-                .and_then(|p| library::load(&p).ok())
-                .unwrap_or_default(),
+            library,
             show_library: false,
             library_selected: HashSet::new(),
             library_drag: None,
@@ -476,60 +511,83 @@ impl App {
             library_undo: None,
             library_rename: None,
             library_edit: None,
-        };
-        if let Some(p) = open {
-            app.load_path(&p);
-        } else if let Some(p) = autosave_path().filter(|p| p.exists())
-            && let Ok(txt) = std::fs::read_to_string(&p)
-            && let Ok(f) = SceneFile::parse(&txt)
-        {
-            app.file_path = f
-                .app_state
-                .get("rustdrawFilePath")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from);
-            app.dirty = f
-                .app_state
-                .get("rustdrawDirty")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            // sem alterações locais, o que estiver no disco vale (recarrega no
-            // primeiro quadro se mudou com o editor fechado)
-            app.watch = app.file_path.as_deref().map(|fp| {
-                let known = if app.dirty {
-                    std::fs::read(fp).unwrap_or_default()
-                } else {
-                    vec![]
-                };
-                Watch::new(fp, &known)
-            });
-            app.dark = f
-                .app_state
-                .get("theme")
-                .and_then(|v| v.as_str())
-                .is_some_and(|t| t == "dark");
-            app.snap = f
-                .app_state
-                .get("objectsSnapModeEnabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            app.live_trusted = f
-                .app_state
-                .get("rustdrawMcpTrusted")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            if let Some(t) = f.app_state.get("rustdrawMcpToken").and_then(|v| v.as_str())
-                && !t.is_empty()
-            {
-                app.live_token = t.to_string();
-            }
-            if f.app_state.get("rustdrawMcpLive").and_then(|v| v.as_bool()) == Some(true) {
-                app.set_live(true);
-                app.toast = None;
-            }
-            app.apply_scene(f);
         }
-        app
+    }
+
+    /// Abre o editor: as preferências vêm sempre do autosave; o desenho vem de
+    /// `open` ou, sem ele, do autosave.
+    ///
+    /// Se o autosave guarda alterações não salvas de outro desenho, elas
+    /// voltam primeiro e o usuário decide (salvar, descartar ou cancelar)
+    /// antes de `open` substituí-las.
+    fn start(&mut self, open: Option<PathBuf>) {
+        let saved = self
+            .autosave
+            .as_deref()
+            .filter(|p| p.exists())
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| SceneFile::parse(&t).ok());
+        if let Some(f) = &saved {
+            self.load_prefs(&f.app_state);
+        }
+        match (open, saved) {
+            (None, Some(f)) => self.restore(f),
+            (Some(p), Some(f)) if has_unsaved_work(&f) => {
+                let same = saved_path(&f).is_some_and(|fp| same_file(&fp, &p));
+                self.restore(f);
+                if !same {
+                    self.open_path(&p);
+                }
+            }
+            (Some(p), _) => self.load_path(&p),
+            (None, None) => {}
+        }
+    }
+
+    /// Tema, encaixe e a configuração da edição por IA guardados no autosave.
+    fn load_prefs(&mut self, state: &Value) {
+        self.dark = state
+            .get("theme")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "dark");
+        self.snap = state
+            .get("objectsSnapModeEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        self.live_trusted = state
+            .get("rustdrawMcpTrusted")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        if let Some(t) = state.get("rustdrawMcpToken").and_then(|v| v.as_str())
+            && !t.is_empty()
+        {
+            self.live_token = t.to_string();
+        }
+        if state.get("rustdrawMcpLive").and_then(|v| v.as_bool()) == Some(true) {
+            self.set_live(true);
+            self.toast = None;
+        }
+    }
+
+    /// Volta ao desenho do autosave (com o arquivo e o estado de "não salvo").
+    fn restore(&mut self, f: SceneFile) {
+        self.file_path = saved_path(&f);
+        self.dirty = f
+            .app_state
+            .get("rustdrawDirty")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // sem alterações locais, o que estiver no disco vale (recarrega no
+        // primeiro quadro se mudou com o editor fechado)
+        self.watch = self.file_path.as_deref().map(|fp| {
+            let known = if self.dirty {
+                std::fs::read(fp).unwrap_or_default()
+            } else {
+                vec![]
+            };
+            Watch::new(fp, &known)
+        });
+        self.apply_scene(f);
     }
 
     // ------------------------------------------------------------------
@@ -713,6 +771,20 @@ impl App {
             }
             Err(e) => self.toast(format!("Não foi possível abrir: {e}")),
         }
+    }
+
+    /// Abre um arquivo, perguntando antes se há alterações não salvas
+    /// (bibliotecas só entram na biblioteca, então não perguntam).
+    pub fn open_path(&mut self, p: &std::path::Path) {
+        if self.dirty
+            && !self.elements.is_empty()
+            && self.confirm.is_none()
+            && !std::fs::read_to_string(p).is_ok_and(|t| library::is_library(&t))
+        {
+            self.confirm = Some(Pending::OpenPath(p.to_path_buf()));
+            return;
+        }
+        self.load_path(p);
     }
 
     pub fn open_dialog(&mut self) {
@@ -1091,6 +1163,7 @@ impl App {
         match p {
             Pending::New => self.new_scene(),
             Pending::Open => self.open_dialog(),
+            Pending::OpenPath(p) => self.open_path(&p),
             Pending::Clear => self.clear_canvas(),
             Pending::ClearLibrary => self.remove_library_items(),
             Pending::Reload => self.reload_from_disk(None),
@@ -1310,6 +1383,12 @@ impl App {
         self.watch = Some(Watch::new(&path, text.as_bytes()));
         self.view_bg = f.view_background().unwrap_or_else(|| "#ffffff".into());
         self.grid = f.grid_enabled();
+        // imagens que o outro programa acrescentou (as antigas ficam, para o desfazer)
+        let new_files = f.files_map();
+        if new_files.keys().any(|k| !self.files.contains_key(k)) {
+            self.bad_images.clear();
+        }
+        self.files.extend(new_files);
         if f.elements != self.elements {
             let before = std::mem::replace(&mut self.elements, f.elements);
             self.undo.push(before);
@@ -1381,7 +1460,7 @@ impl App {
 
     fn write_to(&mut self, p: &std::path::Path) {
         let json = self.scene_file().to_json();
-        match std::fs::write(p, &json) {
+        match crate::edit::write_atomic(p, json.as_bytes()) {
             Ok(()) => {
                 self.watch = Some(Watch::new(p, json.as_bytes()));
                 self.file_path = Some(p.to_path_buf());
@@ -1394,7 +1473,9 @@ impl App {
     }
 
     fn write_autosave(&mut self) {
-        let Some(path) = autosave_path() else { return };
+        let Some(path) = self.autosave.clone() else {
+            return;
+        };
         let mut f = self.scene_file();
         if let Some(obj) = f.app_state.as_object_mut() {
             if let Some(fp) = &self.file_path {
@@ -1413,13 +1494,7 @@ impl App {
                 serde_json::json!(self.live_trusted),
             );
         }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, f.to_json()).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
+        let _ = crate::edit::write_atomic(&path, f.to_json().as_bytes());
         self.autosave_pending = false;
     }
 
@@ -4460,7 +4535,7 @@ impl App {
             let at = at.map(|p| p + P::new(offset, offset));
             let p = f.path().to_path_buf();
             if !files::is_image_path(&p) {
-                self.load_path(&p);
+                self.open_path(&p);
                 return;
             }
             match f.bytes() {
@@ -4709,6 +4784,129 @@ mod tests {
         e.height = 50.0;
         e.angle = angle;
         e
+    }
+
+    fn tmp_dir() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rustdraw-app-{}", new_id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Desenho com `n` retângulos em `dir/name`.
+    fn drawing(dir: &std::path::Path, name: &str, n: usize) -> PathBuf {
+        let p = dir.join(name);
+        let f = SceneFile::new((0..n).map(|_| rect(0.0)).collect(), "#ffffff", false);
+        std::fs::write(&p, f.to_json()).unwrap();
+        p
+    }
+
+    /// Autosave com um retângulo e estes campos no `appState`.
+    fn autosave(dir: &std::path::Path, state: Value) -> PathBuf {
+        let mut f = SceneFile::new(vec![rect(0.0)], "#ffffff", false);
+        let obj = f.app_state.as_object_mut().unwrap();
+        obj.extend(state.as_object().unwrap().clone());
+        let p = dir.join("autosave.excalidraw");
+        std::fs::write(&p, f.to_json()).unwrap();
+        p
+    }
+
+    fn app_with(saved: &std::path::Path, open: Option<PathBuf>) -> App {
+        let mut app = App::empty(egui::Context::default(), Some(saved.into()), vec![]);
+        app.start(open);
+        app
+    }
+
+    #[test]
+    fn opening_a_file_keeps_preferences_and_mcp_key() {
+        let dir = tmp_dir();
+        let saved = autosave(
+            &dir,
+            serde_json::json!({"theme": "dark", "objectsSnapModeEnabled": true,
+                "rustdrawMcpToken": "chave-antiga", "rustdrawMcpTrusted": ["claude-code"],
+                "rustdrawDirty": false}),
+        );
+        let b = drawing(&dir, "b.excalidraw", 3);
+        let mut app = app_with(&saved, Some(b.clone()));
+        assert!(app.dark && app.snap);
+        assert_eq!(app.live_token, "chave-antiga");
+        assert_eq!(app.live_trusted, ["claude-code"]);
+        assert_eq!(app.elements.len(), 3);
+        assert_eq!(app.file_path.as_deref(), Some(b.as_path()));
+        app.flush_autosave();
+        let back = SceneFile::parse(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        assert_eq!(back.app_state["rustdrawMcpToken"], "chave-antiga");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsaved_work_comes_back_before_opening_another_file() {
+        let dir = tmp_dir();
+        let a = drawing(&dir, "a.excalidraw", 0);
+        let b = drawing(&dir, "b.excalidraw", 3);
+        let state = serde_json::json!({"rustdrawDirty": true, "rustdrawFilePath": a});
+        let saved = autosave(&dir, state);
+        let mut app = app_with(&saved, Some(b.clone()));
+        assert_eq!(app.elements.len(), 1, "o desenho não salvo voltou");
+        assert_eq!(app.confirm, Some(Pending::OpenPath(b.clone())));
+        // "Descartar" na pergunta
+        app.dirty = false;
+        let pending = app.confirm.take().unwrap();
+        app.run_pending(pending);
+        assert_eq!(app.elements.len(), 3);
+
+        // o mesmo arquivo: as alterações não salvas dele continuam
+        let state = serde_json::json!({"rustdrawDirty": true, "rustdrawFilePath": b});
+        let saved = autosave(&dir, state);
+        let app = app_with(&saved, Some(b.clone()));
+        assert_eq!(app.elements.len(), 1);
+        assert!(app.dirty && app.confirm.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropped_file_asks_before_replacing_unsaved_work() {
+        let dir = tmp_dir();
+        let b = drawing(&dir, "b.excalidraw", 3);
+        let mut app = app_with(&dir.join("autosave.excalidraw"), None);
+        app.elements.push(rect(0.0));
+        app.dirty = true;
+        app.open_path(&b);
+        assert_eq!(app.elements.len(), 1);
+        assert_eq!(app.confirm, Some(Pending::OpenPath(b)));
+        // uma biblioteca só entra na biblioteca: não pergunta
+        app.confirm = None;
+        let lib = dir.join("x.excalidrawlib");
+        std::fs::write(&lib, library::to_json(&[])).unwrap();
+        app.open_path(&lib);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.elements.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_keeps_images_added_by_another_program() {
+        let dir = tmp_dir();
+        let a = drawing(&dir, "a.excalidraw", 1);
+        let mut app = app_with(&dir.join("autosave.excalidraw"), Some(a.clone()));
+        // outro programa (o `rustdraw mcp`, o excalidraw.com) acrescenta uma imagem
+        let mut f = SceneFile::parse(&std::fs::read_to_string(&a).unwrap()).unwrap();
+        let mut fs = Map::new();
+        let png = image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 255, 255]));
+        let added = files::add_bytes(&mut fs, &files::encode_png(&png).unwrap()).unwrap();
+        f.elements
+            .push(files::image_element(&added, 0.0, 0.0, 100.0));
+        f.set_files(&fs);
+        std::fs::write(&a, f.to_json()).unwrap();
+        app.reload_from_disk(None);
+        assert_eq!(app.elements.len(), 2);
+        assert!(app.files.contains_key(&added.id));
+        app.save();
+        let back = SceneFile::parse(&std::fs::read_to_string(&a).unwrap()).unwrap();
+        assert!(
+            back.files_map().contains_key(&added.id),
+            "a imagem continua no arquivo"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
