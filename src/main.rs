@@ -4,6 +4,7 @@
 //!   rustdraw [arquivo.excalidraw]
 //!   rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg] [--frame NOME]
 //!   rustdraw mcp [arquivo.excalidraw]
+//!   rustdraw icon <saida.png> [--size N] [--margin F]
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -16,6 +17,7 @@ mod files;
 mod fonts;
 mod frame;
 mod geom;
+mod icons;
 mod label;
 mod laser;
 mod library;
@@ -65,7 +67,8 @@ fn usage() -> ! {
         "RustDraw {}\n\n\
          Uso:\n  rustdraw [arquivo.excalidraw]\n  \
          rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg] [--frame NOME]\n  \
-         rustdraw mcp [arquivo.excalidraw]   (servidor MCP por stdio)",
+         rustdraw mcp [arquivo.excalidraw]   (servidor MCP por stdio)\n  \
+         rustdraw icon <saida.png> [--size N] [--margin F]   (ícone do app)",
         env!("CARGO_PKG_VERSION")
     );
     std::process::exit(2)
@@ -115,6 +118,34 @@ fn cli_export(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Grava o ícone do app em PNG; o pacote do macOS é montado com ele.
+fn cli_icon(args: &[String]) -> Result<(), String> {
+    let (mut size, mut margin, mut out) = (512u32, 0.0f32, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--size" => {
+                size = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|s| (16..=2048).contains(s))
+                    .ok_or("--size precisa de um número entre 16 e 2048")?
+            }
+            "--margin" => {
+                margin = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|m| (0.0..0.4).contains(m))
+                    .ok_or("--margin precisa de uma fração entre 0 e 0.4")?
+            }
+            _ if out.is_none() => out = Some(a.clone()),
+            _ => usage(),
+        }
+    }
+    let Some(out) = out else { usage() };
+    std::fs::write(&out, icons::app_icon_png(size, margin)?).map_err(|e| format!("{out}: {e}"))
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -125,6 +156,13 @@ fn main() -> eframe::Result {
         }
         Some("export") => {
             if let Err(e) = cli_export(&args[1..]) {
+                eprintln!("erro: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some("icon") => {
+            if let Err(e) = cli_icon(&args[1..]) {
                 eprintln!("erro: {e}");
                 std::process::exit(1);
             }
@@ -144,6 +182,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("RustDraw")
             .with_app_id("rustdraw")
+            .with_icon(icons::window_icon())
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([640.0, 480.0])
             .with_drag_and_drop(true),

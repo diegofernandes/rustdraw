@@ -2,6 +2,7 @@
 //! zoom/desfazer, editor de texto, exportação, ajuda e avisos.
 
 use crate::app::{App, Drag, Pending, SELECTION, Tool};
+use crate::icons::{self, Icon};
 use crate::model::{Element, parse_color};
 use crate::render;
 use egui::{
@@ -13,27 +14,6 @@ use serde_json::json;
 const STROKES: [&str; 5] = ["#1e1e1e", "#e03131", "#2f9e44", "#1971c2", "#f08c00"];
 const BACKGROUNDS: [&str; 5] = ["transparent", "#ffc9c9", "#b2f2bb", "#a5d8ff", "#ffec99"];
 const CANVAS_BGS: [&str; 5] = ["#ffffff", "#f8f9fa", "#f5faff", "#fffce8", "#fdf8f6"];
-
-#[derive(Clone, Copy, PartialEq)]
-enum Icon {
-    Hand,
-    Select,
-    Rect,
-    Diamond,
-    Ellipse,
-    Arrow,
-    Line,
-    Draw,
-    Text,
-    Image,
-    Eraser,
-    Frame,
-    Laser,
-    Lock(bool),
-    Menu,
-    Undo,
-    Redo,
-}
 
 /// Rótulos de atalho com os nomes das teclas do sistema: no macOS, "Ctrl"
 /// vira "Cmd" e "Alt" vira "Option", como no Excalidraw. Os atalhos em si já
@@ -72,224 +52,70 @@ fn keys_for(s: &str, mac: bool) -> String {
     out
 }
 
+// Paleta da interface, do design dos ícones: papel quente e óxido.
+const PAPER: Color32 = Color32::from_rgb(0xFF, 0xFD, 0xF9);
+const PAPER_LINE: Color32 = Color32::from_rgb(0xE0, 0xD6, 0xC8);
+const PAPER_HOVER: Color32 = Color32::from_rgb(0xEF, 0xE8, 0xDE);
+const INK: Color32 = Color32::from_rgb(0x20, 0x1C, 0x19);
+const OXIDE_BG: Color32 = Color32::from_rgb(0xF5, 0xDD, 0xD1);
+const OXIDE_FG: Color32 = Color32::from_rgb(0x8E, 0x35, 0x19);
+const NIGHT: Color32 = Color32::from_rgb(0x26, 0x21, 0x1E);
+const NIGHT_LINE: Color32 = Color32::from_rgb(0x3D, 0x35, 0x30);
+const NIGHT_HOVER: Color32 = Color32::from_rgb(0x38, 0x30, 0x2B);
+const NIGHT_INK: Color32 = Color32::from_rgb(0xEE, 0xE8, 0xE0);
+const EMBER_BG: Color32 = Color32::from_rgb(0x4E, 0x2C, 0x1F);
+const EMBER_FG: Color32 = Color32::from_rgb(0xF0, 0x8A, 0x5D);
+
 fn panel_frame(ui: &Ui) -> Frame {
     let dark = ui.visuals().dark_mode;
     Frame::new()
-        .fill(if dark {
-            Color32::from_rgb(35, 35, 41)
-        } else {
-            Color32::WHITE
-        })
-        .corner_radius(CornerRadius::same(8))
-        .stroke(Stroke::new(
-            1.0,
-            if dark {
-                Color32::from_gray(55)
-            } else {
-                Color32::from_gray(225)
-            },
-        ))
+        .fill(if dark { NIGHT } else { PAPER })
+        .corner_radius(CornerRadius::same(10))
+        .stroke(Stroke::new(1.0, if dark { NIGHT_LINE } else { PAPER_LINE }))
         .shadow(Shadow {
-            offset: [0, 2],
-            blur: 10,
+            offset: [0, 4],
+            blur: 16,
             spread: 0,
-            color: Color32::from_black_alpha(if dark { 90 } else { 28 }),
+            color: if dark {
+                Color32::from_black_alpha(90)
+            } else {
+                Color32::from_rgba_unmultiplied(32, 28, 25, 22)
+            },
         })
         .inner_margin(Margin::same(6))
 }
 
+/// Fundo de um botão ativo (ferramenta escolhida, opção ligada).
 fn accent_bg(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
-        Color32::from_rgb(64, 62, 110)
+        EMBER_BG
     } else {
-        Color32::from_rgb(224, 223, 255)
+        OXIDE_BG
+    }
+}
+
+/// Cor do ícone e do texto de um botão ativo.
+fn accent_fg(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        EMBER_FG
+    } else {
+        OXIDE_FG
+    }
+}
+
+fn hover_bg(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        NIGHT_HOVER
+    } else {
+        PAPER_HOVER
     }
 }
 
 fn fg(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
-        Color32::from_gray(225)
+        NIGHT_INK
     } else {
-        Color32::from_gray(30)
-    }
-}
-
-fn rel(r: Rect, fx: f32, fy: f32) -> Pos2 {
-    pos2(r.left() + fx * r.width(), r.top() + fy * r.height())
-}
-
-fn paint_icon(p: &Painter, r: Rect, icon: Icon, col: Color32) {
-    let s = Stroke::new(1.6, col);
-    let pts = |v: &[(f32, f32)]| v.iter().map(|(x, y)| rel(r, *x, *y)).collect::<Vec<_>>();
-    match icon {
-        Icon::Hand => {
-            for (i, x) in [0.3f32, 0.45, 0.6, 0.75].iter().enumerate() {
-                let top = if i == 0 || i == 3 { 0.22 } else { 0.1 };
-                p.line_segment([rel(r, *x, top), rel(r, *x, 0.55)], Stroke::new(2.0, col));
-            }
-            p.line_segment(
-                [rel(r, 0.12, 0.45), rel(r, 0.3, 0.68)],
-                Stroke::new(2.0, col),
-            );
-            let palm = Rect::from_min_max(rel(r, 0.26, 0.5), rel(r, 0.8, 0.95));
-            p.rect_stroke(palm, 4.0, s, StrokeKind::Middle);
-        }
-        Icon::Select => {
-            p.add(Shape::closed_line(
-                pts(&[
-                    (0.28, 0.1),
-                    (0.28, 0.82),
-                    (0.45, 0.66),
-                    (0.57, 0.92),
-                    (0.67, 0.87),
-                    (0.55, 0.62),
-                    (0.78, 0.6),
-                ]),
-                s,
-            ));
-        }
-        Icon::Rect => {
-            p.rect_stroke(r.shrink(2.0), 3.0, s, StrokeKind::Middle);
-        }
-        Icon::Diamond => {
-            p.add(Shape::closed_line(
-                pts(&[(0.5, 0.05), (0.95, 0.5), (0.5, 0.95), (0.05, 0.5)]),
-                s,
-            ));
-        }
-        Icon::Ellipse => {
-            p.circle_stroke(r.center(), r.width() / 2.0 - 1.0, s);
-        }
-        Icon::Arrow => {
-            p.line_segment([rel(r, 0.1, 0.9), rel(r, 0.9, 0.1)], s);
-            p.add(Shape::line(pts(&[(0.45, 0.1), (0.9, 0.1), (0.9, 0.55)]), s));
-        }
-        Icon::Line => {
-            p.line_segment([rel(r, 0.1, 0.9), rel(r, 0.9, 0.1)], s);
-        }
-        Icon::Draw => {
-            p.add(Shape::line(
-                pts(&[
-                    (0.05, 0.75),
-                    (0.2, 0.4),
-                    (0.35, 0.7),
-                    (0.5, 0.3),
-                    (0.65, 0.65),
-                    (0.8, 0.25),
-                    (0.95, 0.45),
-                ]),
-                s,
-            ));
-        }
-        Icon::Text => {
-            p.text(
-                r.center(),
-                Align2::CENTER_CENTER,
-                "A",
-                FontId::proportional(r.height() * 1.1),
-                col,
-            );
-        }
-        Icon::Image => {
-            p.rect_stroke(r.shrink(1.5), 2.0, s, StrokeKind::Middle);
-            p.add(Shape::line(
-                pts(&[
-                    (0.1, 0.85),
-                    (0.4, 0.5),
-                    (0.6, 0.7),
-                    (0.72, 0.58),
-                    (0.9, 0.78),
-                ]),
-                s,
-            ));
-            p.circle_stroke(rel(r, 0.68, 0.3), r.width() * 0.09, s);
-        }
-        Icon::Eraser => {
-            p.add(Shape::closed_line(
-                pts(&[(0.15, 0.6), (0.55, 0.15), (0.9, 0.5), (0.5, 0.95)]),
-                s,
-            ));
-            p.line_segment([rel(r, 0.33, 0.4), rel(r, 0.7, 0.77)], s);
-        }
-        Icon::Frame => {
-            // cerquilha: as bordas passam um pouco dos cantos
-            for t in [0.25, 0.75] {
-                p.line_segment([rel(r, 0.05, t), rel(r, 0.95, t)], s);
-                p.line_segment([rel(r, t, 0.05), rel(r, t, 0.95)], s);
-            }
-        }
-        Icon::Laser => {
-            // caneta em diagonal com raios saindo da ponta, como no Excalidraw
-            p.add(Shape::closed_line(
-                pts(&[(0.48, 0.64), (0.92, 0.2), (0.8, 0.08), (0.36, 0.52)]),
-                s,
-            ));
-            let tip = rel(r, 0.3, 0.7);
-            let w = r.width();
-            for (dx, dy) in [
-                (-1.0, 0.0),
-                (-0.87, -0.5),
-                (-0.71, 0.71),
-                (0.0, 1.0),
-                (0.5, 0.87),
-            ] {
-                let d = vec2(dx, dy) * w;
-                p.line_segment([tip + d * 0.12, tip + d * 0.24], s);
-            }
-        }
-        Icon::Lock(locked) => {
-            let body = Rect::from_min_max(rel(r, 0.18, 0.48), rel(r, 0.82, 0.95));
-            p.rect_stroke(body, 2.0, s, StrokeKind::Middle);
-            let right_y = if locked { 0.48 } else { 0.3 };
-            p.add(Shape::line(
-                pts(&[
-                    (0.3, 0.48),
-                    (0.3, 0.3),
-                    (0.35, 0.12),
-                    (0.5, 0.05),
-                    (0.65, 0.12),
-                    (0.7, 0.3),
-                    (0.7, right_y),
-                ]),
-                s,
-            ));
-            if locked {
-                p.circle_filled(rel(r, 0.5, 0.7), 1.6, col);
-            }
-        }
-        Icon::Menu => {
-            for y in [0.2, 0.5, 0.8] {
-                p.line_segment([rel(r, 0.1, y), rel(r, 0.9, y)], s);
-            }
-        }
-        Icon::Undo | Icon::Redo => {
-            let mirror = |v: &[(f32, f32)]| {
-                v.iter()
-                    .map(|(x, y)| {
-                        if icon == Icon::Redo {
-                            (1.0 - x, *y)
-                        } else {
-                            (*x, *y)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            };
-            p.add(Shape::line(
-                pts(&mirror(&[
-                    (0.15, 0.4),
-                    (0.6, 0.4),
-                    (0.85, 0.55),
-                    (0.85, 0.75),
-                    (0.6, 0.9),
-                    (0.35, 0.9),
-                ])),
-                s,
-            ));
-            p.add(Shape::line(
-                pts(&mirror(&[(0.35, 0.15), (0.12, 0.4), (0.35, 0.65)])),
-                s,
-            ));
-        }
+        INK
     }
 }
 
@@ -303,19 +129,129 @@ fn icon_button(
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     let bg = if selected {
         accent_bg(ui)
-    } else if resp.hovered() {
-        ui.visuals().widgets.hovered.weak_bg_fill
+    } else if resp.hovered() && ui.is_enabled() {
+        hover_bg(ui)
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 6.0, bg);
-    let col = if selected && !ui.visuals().dark_mode {
-        Color32::from_rgb(0x43, 0x41, 0x9e)
+    ui.painter().rect_filled(rect, (size * 0.23).round(), bg);
+    let col = if selected { accent_fg(ui) } else { fg(ui) };
+    let col = if ui.is_enabled() {
+        col
     } else {
-        fg(ui)
+        col.gamma_multiply(0.4)
     };
     paint(ui.painter(), rect, col);
     resp.on_hover_text(keys(tooltip))
+}
+
+/// Botão com um ícone do design: metade do botão, no mínimo 18 px.
+fn tool_button(ui: &mut Ui, selected: bool, size: f32, tooltip: &str, icon: Icon) -> Response {
+    icon_button(ui, selected, size, tooltip, |p, r, c| {
+        let side = (size * 0.5).max(18.0).min(size - 8.0);
+        icons::paint(
+            p,
+            Rect::from_center_size(r.center(), vec2(side, side)),
+            icon,
+            c,
+        )
+    })
+}
+
+/// Linha de menu: ícone (opcional), rótulo e atalho à direita. `on` destaca
+/// as opções liga/desliga que estão ligadas.
+fn menu_row(
+    ui: &mut Ui,
+    icon: Option<Icon>,
+    label: &str,
+    shortcut: &str,
+    on: Option<bool>,
+) -> Response {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+    let checked = on == Some(true);
+    resp.widget_info(|| match on {
+        Some(v) => egui::WidgetInfo::selected(egui::Role::CheckBox, true, v, label),
+        None => egui::WidgetInfo::labeled(egui::Role::Button, true, label),
+    });
+    let bg = if checked {
+        accent_bg(ui)
+    } else if resp.hovered() {
+        hover_bg(ui)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 7.0, bg);
+    let col = if checked { accent_fg(ui) } else { fg(ui) };
+    let y = rect.center().y;
+    if let Some(icon) = icon {
+        let r = Rect::from_center_size(pos2(rect.left() + 17.0, y), vec2(18.0, 18.0));
+        icons::paint(p, r, icon, col);
+    }
+    p.text(
+        pos2(rect.left() + 36.0, y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.5),
+        col,
+    );
+    if !shortcut.is_empty() {
+        p.text(
+            pos2(rect.right() - 8.0, y),
+            Align2::RIGHT_CENTER,
+            keys(shortcut),
+            FontId::proportional(12.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    resp
+}
+
+/// Botão com ícone e texto (exportar PNG/SVG).
+fn labeled_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
+    let font = FontId::proportional(14.0);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
+        .size()
+        .x;
+    let (rect, resp) = ui.allocate_exact_size(vec2(text_w + 50.0, 34.0), Sense::click());
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        8.0,
+        if resp.hovered() {
+            hover_bg(ui)
+        } else {
+            ui.visuals().faint_bg_color
+        },
+    );
+    p.rect_stroke(
+        rect,
+        8.0,
+        Stroke::new(
+            1.0,
+            if ui.visuals().dark_mode {
+                NIGHT_LINE
+            } else {
+                PAPER_LINE
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    let c = fg(ui);
+    let y = rect.center().y;
+    let r = Rect::from_center_size(pos2(rect.left() + 21.0, y), vec2(18.0, 18.0));
+    icons::paint(p, r, icon, c);
+    p.text(
+        pos2(rect.left() + 38.0, y),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        c,
+    );
+    resp
 }
 
 fn swatch(ui: &mut Ui, color: &str, selected: bool, dark: bool) -> Response {
@@ -344,7 +280,7 @@ fn swatch(ui: &mut Ui, color: &str, selected: bool, dark: bool) -> Response {
         p.rect_stroke(
             rect.expand(0.5),
             6.0,
-            Stroke::new(2.0, SELECTION),
+            Stroke::new(2.0, accent_fg(ui)),
             StrokeKind::Middle,
         );
     }
@@ -521,7 +457,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
     let has_selection = !sel_kinds.is_empty();
 
     egui::Area::new(Id::unique("props"))
-        .fixed_pos(pos2(12.0, 64.0))
+        .fixed_pos(pos2(12.0, 80.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             panel_frame(ui).show(ui, |ui| {
@@ -930,50 +866,26 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                                 "Trazer para frente (Ctrl+Shift+])",
                             )
                         };
-                        for (front, all, tip) in [
-                            (false, true, to_back),
-                            (false, false, "Recuar (Ctrl+[)"),
-                            (true, false, "Avançar (Ctrl+])"),
-                            (true, true, to_front),
+                        for (front, all, tip, icon) in [
+                            (false, true, to_back, Icon::SendToBack),
+                            (false, false, "Recuar (Ctrl+[)", Icon::SendBackward),
+                            (true, false, "Avançar (Ctrl+])", Icon::BringForward),
+                            (true, true, to_front, Icon::BringToFront),
                         ] {
-                            if icon_button(ui, false, 30.0, tip, |p, r, col| {
-                                let b = r.shrink(8.0);
-                                let s = Stroke::new(1.6, col);
-                                let (from, to) = if front {
-                                    (b.bottom(), b.top() + 2.0)
-                                } else {
-                                    (b.top(), b.bottom() - 2.0)
-                                };
-                                let x = b.center().x;
-                                p.line_segment([pos2(x, from), pos2(x, to)], s);
-                                let d = if front { 4.0 } else { -4.0 };
-                                p.line_segment([pos2(x, to), pos2(x - 4.0, to + d)], s);
-                                p.line_segment([pos2(x, to), pos2(x + 4.0, to + d)], s);
-                                if all {
-                                    let y = if front {
-                                        b.top() - 1.0
-                                    } else {
-                                        b.bottom() + 1.0
-                                    };
-                                    p.line_segment([pos2(b.left(), y), pos2(b.right(), y)], s);
-                                }
-                            })
-                            .clicked()
-                            {
+                            if tool_button(ui, false, 32.0, tip, icon).clicked() {
                                 app.reorder(front, all);
                             }
                         }
                     });
                     section(ui, "Ações");
                     ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .small_button("Duplicar")
-                            .on_hover_text(keys("Ctrl+D"))
+                        if tool_button(ui, false, 32.0, "Duplicar (Ctrl+D)", Icon::Duplicate)
                             .clicked()
                         {
                             app.duplicate_selected();
                         }
-                        if ui.small_button("Excluir").on_hover_text("Delete").clicked() {
+                        if tool_button(ui, false, 32.0, "Excluir (Delete)", Icon::Delete).clicked()
+                        {
                             app.delete_selected();
                         }
                         if app.selected.len() > 1
@@ -1002,66 +914,86 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
         });
 }
 
+/// Divisória vertical da barra de ferramentas.
+fn tool_sep(ui: &mut Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(13.0, height), Sense::hover());
+    let line = if ui.visuals().dark_mode {
+        NIGHT_LINE
+    } else {
+        PAPER_LINE
+    };
+    ui.painter().line_segment(
+        [
+            pos2(rect.center().x, rect.center().y - 12.0),
+            pos2(rect.center().x, rect.center().y + 12.0),
+        ],
+        Stroke::new(1.0, line),
+    );
+}
+
 fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
+    // `None` é uma divisória; a imagem não é um modo: abre o seletor de arquivo
+    let tools = [
+        Some((Tool::Hand, Icon::Hand, "Mão — mover a tela (H)")),
+        None,
+        Some((Tool::Select, Icon::Select, "Seleção (V ou 1)")),
+        Some((Tool::Rect, Icon::Rect, "Retângulo (R ou 2)")),
+        Some((Tool::Diamond, Icon::Diamond, "Losango (D ou 3)")),
+        Some((Tool::Ellipse, Icon::Ellipse, "Elipse (O ou 4)")),
+        Some((Tool::Arrow, Icon::Arrow, "Seta (A ou 5)")),
+        Some((Tool::Line, Icon::Line, "Linha (L ou 6)")),
+        Some((Tool::Draw, Icon::Draw, "Desenho livre (P ou 7)")),
+        Some((Tool::Text, Icon::Text, "Texto (T ou 8)")),
+        Some((Tool::Select, Icon::Image, "Inserir imagem (9)")),
+        Some((Tool::Eraser, Icon::Eraser, "Borracha (E ou 0)")),
+        None,
+        Some((Tool::Frame, Icon::Frame, "Frame (F)")),
+        Some((Tool::Laser, Icon::Laser, "Ponteiro laser (K)")),
+    ];
+    // botões de 44 px, como no design; encolhem quando a janela é estreita,
+    // para não cobrir o menu e a biblioteca
+    let buttons = tools.iter().flatten().count() + 1;
+    let seps = tools.len() + 1 - buttons;
+    let room = view.width() - 2.0 * 150.0 - seps as f32 * 15.0 - 14.0;
+    let size = (room / buttons as f32 - 2.0).clamp(30.0, 44.0).floor();
     egui::Area::new(Id::unique("toolbar"))
-        .fixed_pos(pos2(view.center().x - 264.0, 12.0))
+        .pivot(Align2::CENTER_TOP)
+        .fixed_pos(pos2(view.center().x, 12.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            panel_frame(ui).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let locked = app.tool_locked;
-                    if icon_button(
-                        ui,
-                        locked,
-                        34.0,
-                        "Manter ferramenta ativa após desenhar (Q)",
-                        |p, r, c| paint_icon(p, r.shrink(10.0), Icon::Lock(locked), c),
-                    )
-                    .clicked()
-                    {
-                        app.tool_locked = !app.tool_locked;
-                    }
-                    ui.separator();
-                    let tools = [
-                        (Tool::Hand, Icon::Hand, "Mão — mover a tela (H)", ""),
-                        (Tool::Select, Icon::Select, "Seleção (V ou 1)", "1"),
-                        (Tool::Rect, Icon::Rect, "Retângulo (R ou 2)", "2"),
-                        (Tool::Diamond, Icon::Diamond, "Losango (D ou 3)", "3"),
-                        (Tool::Ellipse, Icon::Ellipse, "Elipse (O ou 4)", "4"),
-                        (Tool::Arrow, Icon::Arrow, "Seta (A ou 5)", "5"),
-                        (Tool::Line, Icon::Line, "Linha (L ou 6)", "6"),
-                        (Tool::Draw, Icon::Draw, "Desenho livre (P ou 7)", "7"),
-                        (Tool::Text, Icon::Text, "Texto (T ou 8)", "8"),
-                        // imagem não é um modo: abre o seletor de arquivo
-                        (Tool::Select, Icon::Image, "Inserir imagem (9)", "9"),
-                        (Tool::Eraser, Icon::Eraser, "Borracha (E ou 0)", "0"),
-                        (Tool::Frame, Icon::Frame, "Frame (F)", "F"),
-                        (Tool::Laser, Icon::Laser, "Ponteiro laser (K)", "K"),
-                    ];
-                    for (tool, icon, tip, key) in tools {
-                        let is_image = icon == Icon::Image;
-                        let on = app.tool == tool && !is_image;
-                        let resp = icon_button(ui, on, 34.0, tip, |p, r, c| {
-                            paint_icon(p, r.shrink(10.0), icon, c);
-                            if !key.is_empty() {
-                                p.text(
-                                    r.right_bottom() - vec2(3.0, 2.0),
-                                    Align2::RIGHT_BOTTOM,
-                                    key,
-                                    FontId::proportional(8.5),
-                                    c.gamma_multiply(0.55),
-                                );
-                            }
-                        });
-                        if resp.clicked() && is_image {
-                            app.image_dialog();
-                        } else if resp.clicked() {
-                            app.set_tool(tool);
+            panel_frame(ui)
+                .corner_radius(CornerRadius::same(14))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let locked = app.tool_locked;
+                        if tool_button(
+                            ui,
+                            locked,
+                            size,
+                            "Manter ferramenta ativa após desenhar (Q)",
+                            Icon::Lock(locked),
+                        )
+                        .clicked()
+                        {
+                            app.tool_locked = !app.tool_locked;
                         }
-                    }
+                        for t in tools {
+                            let Some((tool, icon, tip)) = t else {
+                                tool_sep(ui, size);
+                                continue;
+                            };
+                            let is_image = icon == Icon::Image;
+                            let on = app.tool == tool && !is_image;
+                            let resp = tool_button(ui, on, size, tip, icon);
+                            if resp.clicked() && is_image {
+                                app.image_dialog();
+                            } else if resp.clicked() {
+                                app.set_tool(tool);
+                            }
+                        }
+                    });
                 });
-            });
         });
 }
 
@@ -1071,14 +1003,9 @@ fn menu(app: &mut App, ctx: &egui::Context) {
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             panel_frame(ui)
-                .inner_margin(Margin::same(3))
+                .corner_radius(CornerRadius::same(14))
                 .show(ui, |ui| {
-                    let open = app.show_menu;
-                    if icon_button(ui, open, 34.0, "Menu", |p, r, c| {
-                        paint_icon(p, r.shrink(11.0), Icon::Menu, c)
-                    })
-                    .clicked()
-                    {
+                    if tool_button(ui, app.show_menu, 44.0, "Menu", Icon::Menu).clicked() {
                         app.show_menu = !app.show_menu;
                     }
                 });
@@ -1087,79 +1014,79 @@ fn menu(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let resp = egui::Area::new(Id::unique("menu"))
-        .fixed_pos(pos2(12.0, 60.0))
+        .fixed_pos(pos2(12.0, 76.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             panel_frame(ui).show(ui, |ui| {
-                ui.set_width(230.0);
+                ui.set_width(250.0);
+                ui.spacing_mut().item_spacing.y = 1.0;
                 let mut close = false;
-                let mut item = |ui: &mut Ui, label: &str, shortcut: &str| {
-                    let r = ui.add(
-                        egui::Button::new(label)
-                            .shortcut_text(keys(shortcut))
-                            .frame(false)
-                            .min_size(vec2(224.0, 26.0)),
-                    );
-                    if r.clicked() {
-                        close = true;
-                    }
-                    r.clicked()
+                let mut item = |ui: &mut Ui, icon: Option<Icon>, label: &str, shortcut: &str| {
+                    let clicked = menu_row(ui, icon, label, shortcut, None).clicked();
+                    close |= clicked;
+                    clicked
                 };
-                if item(ui, "Abrir…", "Ctrl+O") {
+                if item(ui, Some(Icon::Open), "Abrir…", "Ctrl+O") {
                     app.open_dialog();
                 }
-                if item(ui, "Salvar", "Ctrl+S") {
+                if item(ui, Some(Icon::Save), "Salvar", "Ctrl+S") {
                     app.save();
                 }
-                if item(ui, "Salvar como…", "Ctrl+Shift+S") {
+                if item(ui, None, "Salvar como…", "Ctrl+Shift+S") {
                     app.save_as();
                 }
-                if item(ui, "Exportar imagem…", "Ctrl+Shift+E") {
+                if item(
+                    ui,
+                    Some(Icon::ExportPng),
+                    "Exportar imagem…",
+                    "Ctrl+Shift+E",
+                ) {
                     app.show_export = true;
                 }
                 ui.separator();
-                if item(ui, "Novo desenho", "") {
+                if item(ui, None, "Novo desenho", "") {
                     app.new_scene();
                 }
-                if item(ui, "Limpar o canvas", "Ctrl+Delete") && !app.elements.is_empty() {
+                if item(ui, Some(Icon::Delete), "Limpar o canvas", "Ctrl+Delete")
+                    && !app.elements.is_empty()
+                {
                     app.confirm = Some(Pending::Clear);
                 }
-                if item(ui, "Atalhos e ajuda", "?") {
+                if item(ui, Some(Icon::Help), "Atalhos e ajuda", "?") {
                     app.show_help = true;
                 }
                 ui.separator();
-                ui.checkbox(&mut app.dark, keys("Tema escuro  (Alt+Shift+D)"));
-                let mut grid = app.grid;
-                if ui.checkbox(&mut grid, keys("Grade  (Ctrl+')")).changed() {
+                let toggle = |ui: &mut Ui, icon: Option<Icon>, label: &str, key: &str, on: bool| {
+                    menu_row(ui, icon, label, key, Some(on)).clicked()
+                };
+                if toggle(ui, Some(Icon::Moon), "Tema escuro", "Alt+Shift+D", app.dark) {
+                    app.dark = !app.dark;
+                }
+                if toggle(ui, Some(Icon::Grid), "Grade", "Ctrl+'", app.grid) {
                     app.toggle_grid();
                 }
-                let mut snap = app.snap;
-                if ui
-                    .checkbox(&mut snap, keys("Encaixar em objetos  (Alt+S)"))
-                    .changed()
-                {
+                if toggle(ui, None, "Encaixar em objetos", "Alt+S", app.snap) {
                     app.toggle_snap();
                 }
-                ui.checkbox(&mut app.zen_mode, keys("Modo zen  (Alt+Z)"));
-                let mut view_mode = app.view_mode;
-                if ui
-                    .checkbox(&mut view_mode, keys("Modo de visualização  (Alt+R)"))
-                    .changed()
-                {
+                if toggle(ui, None, "Modo zen", "Alt+Z", app.zen_mode) {
+                    app.zen_mode = !app.zen_mode;
+                }
+                if toggle(ui, None, "Modo de visualização", "Alt+R", app.view_mode) {
                     app.toggle_view_mode();
                 }
-                ui.checkbox(&mut app.show_stats, keys("Estatísticas  (Alt+/)"));
-                let mut live = app.live.is_some();
-                if ui
-                    .checkbox(&mut live, "Permitir edição por IA (MCP)")
+                if toggle(ui, None, "Estatísticas", "Alt+/", app.show_stats) {
+                    app.show_stats = !app.show_stats;
+                }
+                let live = app.live.is_some();
+                if menu_row(ui, None, "Permitir edição por IA (MCP)", "", Some(live))
                     .on_hover_text(
                         "Deixa um assistente de IA ligado ao `rustdraw mcp` editar este \
                          desenho enquanto o editor está aberto. Só aceita conexões deste \
                          computador.",
                     )
-                    .changed()
+                    .clicked()
                 {
-                    app.set_live(live);
+                    app.set_live(!live);
                 }
                 let label = match &app.live {
                     Some(h) => format!("Ver conexões  (127.0.0.1:{})", h.port),
@@ -1185,7 +1112,7 @@ fn menu(app: &mut App, ctx: &egui::Context) {
     let pressed_outside = ctx.input(|i| i.pointer.any_pressed())
         && ctx.pointer_interact_pos().is_some_and(|p| {
             !resp.rect.contains(p)
-                && !Rect::from_min_size(pos2(12.0, 12.0), vec2(44.0, 44.0)).contains(p)
+                && !Rect::from_min_size(pos2(12.0, 12.0), vec2(58.0, 58.0)).contains(p)
         });
     if pressed_outside {
         app.show_menu = false;
@@ -1461,13 +1388,8 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
-                            if icon_button(ui, false, 30.0, "Diminuir zoom (Ctrl+-)", |p, r, c| {
-                                p.line_segment(
-                                    [r.center() - vec2(5.0, 0.0), r.center() + vec2(5.0, 0.0)],
-                                    Stroke::new(1.6, c),
-                                );
-                            })
-                            .clicked()
+                            if tool_button(ui, false, 32.0, "Diminuir zoom (Ctrl+-)", Icon::ZoomOut)
+                                .clicked()
                             {
                                 app.zoom_step(view, -1.0);
                             }
@@ -1476,7 +1398,7 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                                 .add(
                                     egui::Button::new(pct)
                                         .frame(false)
-                                        .min_size(vec2(52.0, 30.0)),
+                                        .min_size(vec2(52.0, 32.0)),
                                 )
                                 .on_hover_text(keys(
                                     "Redefinir zoom (Ctrl+0) · Ajustar à tela: Shift+1",
@@ -1485,17 +1407,8 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                             {
                                 app.reset_zoom(view);
                             }
-                            if icon_button(ui, false, 30.0, "Aumentar zoom (Ctrl++)", |p, r, c| {
-                                p.line_segment(
-                                    [r.center() - vec2(5.0, 0.0), r.center() + vec2(5.0, 0.0)],
-                                    Stroke::new(1.6, c),
-                                );
-                                p.line_segment(
-                                    [r.center() - vec2(0.0, 5.0), r.center() + vec2(0.0, 5.0)],
-                                    Stroke::new(1.6, c),
-                                );
-                            })
-                            .clicked()
+                            if tool_button(ui, false, 32.0, "Aumentar zoom (Ctrl++)", Icon::ZoomIn)
+                                .clicked()
                             {
                                 app.zoom_step(view, 1.0);
                             }
@@ -1507,21 +1420,19 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             ui.add_enabled_ui(app.can_undo(), |ui| {
-                                if icon_button(ui, false, 30.0, "Desfazer (Ctrl+Z)", |p, r, c| {
-                                    paint_icon(p, r.shrink(9.0), Icon::Undo, c)
-                                })
-                                .clicked()
+                                if tool_button(ui, false, 32.0, "Desfazer (Ctrl+Z)", Icon::Undo)
+                                    .clicked()
                                 {
                                     app.undo();
                                 }
                             });
                             ui.add_enabled_ui(app.can_redo(), |ui| {
-                                if icon_button(
+                                if tool_button(
                                     ui,
                                     false,
-                                    30.0,
+                                    32.0,
                                     "Refazer (Ctrl+Shift+Z)",
-                                    |p, r, c| paint_icon(p, r.shrink(9.0), Icon::Redo, c),
+                                    Icon::Redo,
                                 )
                                 .clicked()
                                 {
@@ -1539,17 +1450,7 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
             panel_frame(ui)
                 .inner_margin(Margin::same(3))
                 .show(ui, |ui| {
-                    if icon_button(ui, app.show_help, 30.0, "Atalhos (?)", |p, r, c| {
-                        p.text(
-                            r.center(),
-                            Align2::CENTER_CENTER,
-                            "?",
-                            FontId::proportional(16.0),
-                            c,
-                        );
-                    })
-                    .clicked()
-                    {
+                    if tool_button(ui, app.show_help, 32.0, "Atalhos (?)", Icon::Help).clicked() {
                         app.show_help = !app.show_help;
                     }
                 });
@@ -1744,10 +1645,10 @@ fn export_window(app: &mut App, ctx: &egui::Context) {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("  PNG  ").strong()).clicked() {
+                if labeled_button(ui, Icon::ExportPng, "PNG").clicked() {
                     app.export_file(false);
                 }
-                if ui.button(RichText::new("  SVG  ").strong()).clicked() {
+                if labeled_button(ui, Icon::ExportSvg, "SVG").clicked() {
                     app.export_file(true);
                 }
                 if ui.button("Copiar SVG").clicked() {
@@ -2023,7 +1924,7 @@ fn hint(app: &App, ctx: &egui::Context) {
         _ => return,
     };
     egui::Area::new(Id::unique("hint"))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, 70.0))
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 80.0))
         .order(egui::Order::Middle)
         .interactable(false)
         .show(ctx, |ui| {
@@ -2486,21 +2387,31 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             panel_frame(ui)
-                .inner_margin(Margin::same(3))
+                .corner_radius(CornerRadius::same(14))
                 .show(ui, |ui| {
                     let open = app.show_library;
-                    let text = RichText::new("Biblioteca").color(if open && !app.dark {
-                        Color32::from_rgb(0x43, 0x41, 0x9e)
+                    let (rect, resp) = ui.allocate_exact_size(vec2(126.0, 44.0), Sense::click());
+                    let bg = if open {
+                        accent_bg(ui)
+                    } else if resp.hovered() {
+                        hover_bg(ui)
                     } else {
-                        fg(ui)
-                    });
-                    let mut b = egui::Button::new(text).min_size(vec2(0.0, 34.0));
-                    b = if open {
-                        b.fill(accent_bg(ui))
-                    } else {
-                        b.frame(false)
+                        Color32::TRANSPARENT
                     };
-                    if ui.add(b).on_hover_text("Biblioteca de formas").clicked() {
+                    let c = if open { accent_fg(ui) } else { fg(ui) };
+                    let p = ui.painter();
+                    p.rect_filled(rect, 10.0, bg);
+                    let y = rect.center().y;
+                    let r = Rect::from_center_size(pos2(rect.left() + 23.0, y), vec2(20.0, 20.0));
+                    icons::paint(p, r, Icon::Library, c);
+                    p.text(
+                        pos2(rect.left() + 42.0, y),
+                        Align2::LEFT_CENTER,
+                        "Biblioteca",
+                        FontId::proportional(14.0),
+                        c,
+                    );
+                    if resp.on_hover_text("Biblioteca de formas").clicked() {
                         app.show_library = !app.show_library;
                     }
                 });
@@ -2509,11 +2420,11 @@ fn library_panel(app: &mut App, ctx: &egui::Context, view: Rect) {
         app.library_drag = None;
         return;
     }
-    let height = (view.height() - 60.0 - 64.0).max(160.0);
+    let height = (view.height() - 76.0 - 64.0).max(160.0);
     let mut insert: Option<String> = None;
     let mut drop_target: Option<String> = None;
     let resp = egui::Area::new(Id::unique("library"))
-        .anchor(Align2::RIGHT_TOP, vec2(-12.0, 60.0))
+        .anchor(Align2::RIGHT_TOP, vec2(-12.0, 76.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             panel_frame(ui)
@@ -2736,7 +2647,7 @@ fn library_tile(
         rect,
         6.0,
         if marked {
-            Stroke::new(2.0, SELECTION)
+            Stroke::new(2.0, accent_fg(ui))
         } else {
             Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
         },

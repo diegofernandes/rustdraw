@@ -1,3 +1,5 @@
+<img src="docs/icon.png" alt="" width="96" align="right">
+
 # RustDraw
 
 Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** — sem navegador, sem servidor, sem conta. Um único executável (~10 MB) com tudo embutido, inclusive a fonte manuscrita Virgil.
@@ -51,6 +53,7 @@ No Linux, para compilar: `sudo apt install libxkbcommon-dev libgl1-mesa-dev` (De
 rustdraw export entrada.excalidraw saida.png --scale 2
 rustdraw export entrada.excalidraw saida.svg --dark --no-bg
 rustdraw export slides.excalidraw tela1.png --frame "Tela 1"   # só um frame
+rustdraw icon rustdraw.png --size 512                           # ícone do app
 ```
 
 `examples/frames.excalidraw` tem um exemplo com dois frames.
@@ -138,6 +141,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, histórico, arquivos |
 | `src/library.rs` | Biblioteca de formas no formato `.excalidrawlib` |
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |
+| `src/icons.rs` | Ícones da interface e ícone do app (caminhos SVG desenhados à mão) |
 | `src/frame.rs` | Frames: quem está dentro de qual, recorte, nomes |
 | `src/laser.rs` | Ponteiro laser: rastro que afina e some com o tempo |
 | `src/fonts.rs` | Fontes embutidas |
