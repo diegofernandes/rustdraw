@@ -733,9 +733,9 @@ impl App {
             DialogKind::Image => match r {
                 Ok(Some(p)) => self.insert_image_file(&p, None),
                 Ok(None) => {}
-                Err(()) => self.toast(format!(
+                Err(()) => self.toast(crate::ui::keys(&format!(
                     "{NO_DIALOG}. Dica: arraste a imagem para a janela ou cole com Ctrl+V."
-                )),
+                ))),
             },
             DialogKind::Export {
                 svg,
