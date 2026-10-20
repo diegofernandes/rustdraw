@@ -62,7 +62,7 @@ rustdraw icon rustdraw.png --size 512                           # ícone do app
 
 O RustDraw fala [MCP](https://modelcontextprotocol.io): um assistente como o Claude Code ou o Claude Desktop consegue ler, desenhar, editar e exportar desenhos. Há dois jeitos de conectar:
 
-- **Direto no editor (HTTP)**: com **Permitir edição por IA (MCP)** ligado no menu (☰), o próprio editor é o servidor MCP em `http://127.0.0.1:7470/mcp`. As ferramentas agem no desenho aberto e as mudanças aparecem na hora. Veja [Editar o desenho aberto no editor](#editar-o-desenho-aberto-no-editor).
+- **Direto no editor (HTTP)**: com **Permitir edição por IA (MCP)** ligado no menu (☰), o próprio editor é o servidor MCP em `http://127.0.0.1:7470/mcp`. As ferramentas agem só no desenho aberto (o parâmetro `file` não vale aqui) e as mudanças aparecem na hora. Veja [Editar o desenho aberto no editor](#editar-o-desenho-aberto-no-editor).
 - **Pelo `rustdraw mcp` (stdio)**: o assistente inicia o `rustdraw mcp` e conversa pelo stdin/stdout. É o jeito para quem só inicia programas, como o Claude Desktop. Ele edita arquivos `.excalidraw` mesmo com o editor fechado e, quando o editor está aberto com a opção ligada, repassa as chamadas sem `file` para ele.
 
 Nada sai do computador: o editor só aceita conexões de `127.0.0.1`.
@@ -112,7 +112,7 @@ Por baixo, o editor escuta só em `127.0.0.1` e só atende quem manda a chave (`
 
 ### Editar um arquivo
 
-Com `file` (ou um arquivo padrão na linha de comando), a ferramenta lê o arquivo, aplica a mudança e grava; um lote com erro não grava nada. Se esse arquivo estiver aberto no editor, as mudanças aparecem sozinhas. Se o desenho aberto tiver alterações não salvas, o editor pergunta se deve recarregar ou manter o seu; Ctrl+Z desfaz a recarga.
+Pelo `rustdraw mcp`, com `file` (ou um arquivo padrão na linha de comando), a ferramenta lê o arquivo, aplica a mudança e grava; um lote com erro não grava nada. Se esse arquivo estiver aberto no editor, as mudanças aparecem sozinhas. Se o desenho aberto tiver alterações não salvas, o editor pergunta se deve recarregar ou manter o seu; Ctrl+Z desfaz a recarga.
 
 ## Atalhos
 
