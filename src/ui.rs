@@ -1140,14 +1140,12 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 {
                     app.set_live(live);
                 }
-                if let Some(h) = &app.live {
-                    let port = h.port;
-                    if ui
-                        .small_button(format!("Ver conexões  (127.0.0.1:{port})"))
-                        .clicked()
-                    {
-                        app.show_live = true;
-                    }
+                let label = match &app.live {
+                    Some(h) => format!("Ver conexões  (127.0.0.1:{})", h.port),
+                    None => "Como configurar o assistente…".into(),
+                };
+                if ui.small_button(label).clicked() {
+                    app.show_live = true;
                 }
                 section(ui, "Fundo do canvas");
                 ui.horizontal(|ui| {
@@ -2080,6 +2078,26 @@ fn mode_exit_button(app: &mut App, ctx: &egui::Context) {
         });
 }
 
+/// Comando do Claude Code e configuração do Claude Desktop que apontam para
+/// este executável.
+fn mcp_setup_commands() -> (String, String) {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "rustdraw".into());
+    let quoted = if exe.contains(' ') {
+        format!("\"{exe}\"")
+    } else {
+        exe.clone()
+    };
+    let cli = format!("claude mcp add rustdraw -- {quoted} mcp");
+    // montado à mão para manter a ordem e caber no painel
+    let desktop = format!(
+        "{{\n  \"mcpServers\": {{\n    \"rustdraw\": {{\n      \"command\": {},\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}",
+        json!(exe)
+    );
+    (cli, desktop)
+}
+
 /// "há 12 s", "há 3 min"...
 fn ago(now: f64, at: f64) -> String {
     let s = (now - at).max(0.0) as u64;
@@ -2212,6 +2230,35 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                     }
                 }
             }
+            egui::CollapsingHeader::new("Como configurar o assistente")
+                .default_open(app.live_sessions.list.is_empty())
+                .show(ui, |ui| {
+                    let (cli, desktop) = mcp_setup_commands();
+                    ui.label("Claude Code, no terminal:");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(RichText::new(&cli).monospace()).wrap());
+                        if ui.small_button("Copiar").clicked() {
+                            ui.ctx().copy_text(cli.clone());
+                            app.toast("Comando copiado");
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label("Claude Desktop, em claude_desktop_config.json:");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(RichText::new(&desktop).monospace()).wrap());
+                        if ui.small_button("Copiar").clicked() {
+                            ui.ctx().copy_text(desktop.clone());
+                            app.toast("Configuração copiada");
+                        }
+                    });
+                    ui.label(
+                        RichText::new(
+                            "Depois, reinicie o assistente. Sem `file`, as ferramentas \
+                             editam este desenho.",
+                        )
+                        .weak(),
+                    );
+                });
             section(ui, "Assistentes nesta sessão");
             if app.live_sessions.list.is_empty() {
                 ui.label(RichText::new("Nenhum ainda.").weak());
@@ -2858,7 +2905,17 @@ fn library_edit_banner(app: &mut App, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::keys_for;
+    use super::{keys_for, mcp_setup_commands};
+    use serde_json::json;
+
+    #[test]
+    fn mcp_setup_commands_point_to_this_exe() {
+        let (cli, desktop) = mcp_setup_commands();
+        assert!(cli.starts_with("claude mcp add rustdraw -- ") && cli.ends_with(" mcp"));
+        let v: serde_json::Value = serde_json::from_str(&desktop).unwrap();
+        assert_eq!(v["mcpServers"]["rustdraw"]["args"], json!(["mcp"]));
+        assert!(v["mcpServers"]["rustdraw"]["command"].is_string());
+    }
 
     #[test]
     fn keys_use_mac_names_only_on_mac() {
