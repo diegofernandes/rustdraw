@@ -214,6 +214,12 @@ pub struct App {
     pub live: Option<live::Host>,
     /// Pedidos da IA esperando o fim de um arrasto ou de um texto.
     live_queue: Vec<live::Request>,
+    /// Quem pediu para editar, o que o usuário decidiu e o histórico de pedidos.
+    pub live_sessions: live::Sessions,
+    /// Assistentes que o usuário mandou "Sempre permitir" (guardado no autosave).
+    pub live_trusted: Vec<String>,
+    /// Painel "Edição por IA".
+    pub show_live: bool,
     pub dark: bool,
     pub grid: bool,
     /// Encaixe em objetos (Alt+S), como o "Snap to objects" do Excalidraw.
@@ -406,6 +412,9 @@ impl App {
             last_watch: 0.0,
             live: None,
             live_queue: vec![],
+            live_sessions: live::Sessions::default(),
+            live_trusted: vec![],
+            show_live: false,
             dark: false,
             grid: false,
             snap: false,
@@ -493,6 +502,11 @@ impl App {
                 .get("objectsSnapModeEnabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            app.live_trusted = f
+                .app_state
+                .get("rustdrawMcpTrusted")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             if f.app_state.get("rustdrawMcpLive").and_then(|v| v.as_bool()) == Some(true) {
                 app.set_live(true);
                 app.toast = None;
@@ -1105,6 +1119,7 @@ impl App {
             match live::Host::start(move || ctx.request_repaint()) {
                 Ok(h) => {
                     self.live = Some(h);
+                    self.live_sessions = live::Sessions::default();
                     self.toast("Edição por IA ligada: o rustdraw mcp agora edita este desenho");
                 }
                 Err(e) => self.toast(format!("Não foi possível ligar a edição por IA: {e}")),
@@ -1139,21 +1154,85 @@ impl App {
         };
         let mut changed = false;
         for req in std::mem::take(&mut self.live_queue) {
-            let mut scene = self.scene_file();
-            match mcp::run_tool(&req.name, &req.args, &mut scene, &source) {
-                Ok((r, c)) => {
-                    if c {
-                        self.apply_live(scene);
-                        changed = true;
-                    }
-                    req.respond(Ok(r));
+            let (client, tool, now) = (req.client.clone(), req.name.clone(), self.now);
+            let entry = |ok: bool, detail: String| live::LogEntry {
+                at: now,
+                client: client.clone(),
+                tool: tool.clone(),
+                ok,
+                detail,
+            };
+            match self.live_sessions.decide(&req, &self.live_trusted) {
+                // esperando o usuário responder na janela de aprovação
+                None => self.live_queue.push(req),
+                Some(false) => {
+                    let e = entry(false, "acesso recusado".into());
+                    self.live_sessions.record(e);
+                    req.respond(Err(format!(
+                        "O usuário não permitiu que {client} edite o desenho no RustDraw."
+                    )));
                 }
-                Err(e) => req.respond(Err(e)),
+                Some(true) => {
+                    let mut scene = self.scene_file();
+                    match mcp::run_tool(&req.name, &req.args, &mut scene, &source) {
+                        Ok((r, c)) => {
+                            let ok = r["isError"] != true;
+                            let detail = match (ok, c) {
+                                (false, _) => r["content"][0]["text"]
+                                    .as_str()
+                                    .unwrap_or("erro")
+                                    .chars()
+                                    .take(160)
+                                    .collect(),
+                                (true, true) => "alterou o desenho".into(),
+                                (true, false) => "leitura".into(),
+                            };
+                            let e = entry(ok, detail);
+                            self.live_sessions.record(e);
+                            if c {
+                                self.apply_live(scene);
+                                changed = true;
+                            }
+                            req.respond(Ok(r));
+                        }
+                        Err(err) => {
+                            let e = entry(false, err.chars().take(160).collect());
+                            self.live_sessions.record(e);
+                            req.respond(Err(err));
+                        }
+                    }
+                }
             }
         }
         if changed {
             self.toast(crate::ui::keys("Desenho alterado pela IA (Ctrl+Z desfaz)"));
         }
+    }
+
+    /// Resposta do usuário na janela de aprovação (ou no painel, ao revogar).
+    pub fn live_answer(&mut self, session: &str, allow: bool, always: bool) {
+        self.live_sessions.set(session, allow);
+        if always
+            && let Some(s) = self.live_sessions.list.iter().find(|s| s.id == session)
+            && !self.live_trusted.contains(&s.client)
+        {
+            self.live_trusted.push(s.client.clone());
+            self.autosave_pending = true;
+            self.last_change = self.now;
+        }
+        self.ctx.request_repaint();
+    }
+
+    /// Pedidos da IA esperando (arrasto, texto ou aprovação).
+    pub fn live_queue_len(&self) -> usize {
+        self.live_queue.len()
+    }
+
+    /// Tira um assistente da lista de "Sempre permitir".
+    pub fn live_untrust(&mut self, client: &str) {
+        self.live_trusted.retain(|c| c != client);
+        self.autosave_pending = true;
+        self.last_change = self.now;
     }
 
     fn apply_live(&mut self, scene: SceneFile) {
@@ -1291,6 +1370,10 @@ impl App {
             );
             obj.insert("objectsSnapModeEnabled".into(), self.snap.into());
             obj.insert("rustdrawMcpLive".into(), self.live.is_some().into());
+            obj.insert(
+                "rustdrawMcpTrusted".into(),
+                serde_json::json!(self.live_trusted),
+            );
         }
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);

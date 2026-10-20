@@ -30,11 +30,25 @@ vê cada mudança na hora.";
 
 pub struct Server {
     default_file: Option<PathBuf>,
+    /// Como este processo se apresenta ao editor aberto.
+    client: live::Client,
+}
+
+impl Server {
+    pub fn new(default_file: Option<PathBuf>) -> Self {
+        Self {
+            default_file,
+            client: live::Client {
+                name: "assistente sem nome".into(),
+                session: crate::model::new_id(),
+            },
+        }
+    }
 }
 
 /// Lê mensagens do stdin até ele fechar.
 pub fn run(default_file: Option<PathBuf>) -> std::io::Result<()> {
-    let mut server = Server { default_file };
+    let mut server = Server::new(default_file);
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -109,7 +123,12 @@ impl Server {
         })
     }
 
-    fn initialize(&self, params: &Value) -> Value {
+    fn initialize(&mut self, params: &Value) -> Value {
+        let info = &params["clientInfo"];
+        // só o nome, sem a versão: "Sempre permitir" vale também depois de atualizar
+        if let Some(name) = info["title"].as_str().or(info["name"].as_str()) {
+            self.client.name = name.to_string();
+        }
         let asked = params.get("protocolVersion").and_then(|v| v.as_str());
         let version = asked
             .filter(|v| PROTOCOL_VERSIONS.contains(v))
@@ -144,7 +163,7 @@ impl Server {
             .unwrap_or(&empty);
         Ok(match self.target(args) {
             Some(path) => self.call_file(name, args, &path),
-            None => match live::call(name, args) {
+            None => match live::call(&self.client, name, args) {
                 Ok(r) => r,
                 Err(live::CallError::Failed(e)) => text_result(json!(e), true),
                 Err(live::CallError::NotRunning) => text_result(json!(NO_TARGET), true),
@@ -492,7 +511,7 @@ mod tests {
 
     #[test]
     fn handshake_and_listing() {
-        let mut s = Server { default_file: None };
+        let mut s = Server::new(None);
         let r = s
             .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#)
             .unwrap();
@@ -518,9 +537,7 @@ mod tests {
     fn edit_and_export_a_file() {
         let dir = std::env::temp_dir().join(format!("rustdraw-mcp-{}", crate::model::new_id()));
         let file = dir.join("d.excalidraw");
-        let mut s = Server {
-            default_file: Some(file.clone()),
-        };
+        let mut s = Server::new(Some(file.clone()));
         let r = call(&mut s, 1, "new_scene", json!({}));
         assert_eq!(r["isError"], false, "{r}");
         let r = call(
