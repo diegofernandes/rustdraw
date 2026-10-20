@@ -582,6 +582,10 @@ pub fn parse_color(s: &str) -> Option<[u8; 4]> {
         return None;
     }
     if let Some(hex) = s.strip_prefix('#') {
+        // os índices abaixo são de bytes: um acento no meio cortaria um caractere
+        if !hex.is_ascii() {
+            return None;
+        }
         let h = |i: usize, len: usize| u8::from_str_radix(&hex[i..i + len], 16).ok();
         return match hex.len() {
             3 | 4 => {
@@ -692,6 +696,9 @@ mod tests {
         assert_eq!(parse_color("#fff"), Some([255, 255, 255, 255]));
         assert_eq!(parse_color("#1e1e1e"), Some([30, 30, 30, 255]));
         assert_eq!(parse_color("transparent"), None);
+        // cor inválida com acento não derruba o app
+        assert_eq!(parse_color("#aéb"), None);
+        assert_eq!(parse_color("#éé"), None);
         assert_eq!(dark_filter([255, 255, 255, 255]), [18, 18, 18, 255]);
     }
 }

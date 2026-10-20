@@ -1773,7 +1773,9 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
 }
 
 fn confirm_window(app: &mut App, ctx: &egui::Context) {
-    let Some(pending) = app.confirm else { return };
+    let Some(pending) = app.confirm.clone() else {
+        return;
+    };
     if pending == Pending::ClearLibrary {
         let some = !app.library_selected.is_empty();
         egui::Window::new(if some {
@@ -1860,12 +1862,15 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
         .show(ctx, |ui| {
+            if let Pending::OpenPath(p) = &pending {
+                ui.label(format!("Abrir {}?", crate::app::file_name(p)));
+            }
             ui.label("O desenho atual tem alterações não salvas. O que deseja fazer?");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Salvar").clicked() {
                     app.confirm = None;
-                    app.save_then(Some(pending));
+                    app.save_then(Some(pending.clone()));
                 }
                 if ui.button("Descartar").clicked() {
                     app.dirty = false;
