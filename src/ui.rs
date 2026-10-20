@@ -2138,8 +2138,9 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                     ));
                     ui.label(
                         RichText::new(
-                            "O rustdraw mcp acha o editor pelo arquivo mcp-live.json, que \
-                             guarda a porta e uma chave nova a cada vez que a opção é ligada.",
+                            "O assistente não usa essa porta direto: o rustdraw mcp acha o \
+                             editor sozinho pelo arquivo mcp-live.json, que guarda a porta e uma \
+                             chave nova a cada vez que a opção é ligada.",
                         )
                         .weak(),
                     );
@@ -2148,7 +2149,10 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                     }
                 }
                 None => {
-                    ui.label("Edição por IA desligada.");
+                    ui.label(
+                        "Edição por IA desligada: o assistente só consegue editar arquivos \
+                         .excalidraw. Ligue para ele editar este desenho.",
+                    );
                     if ui.button("Ligar").clicked() {
                         app.set_live(true);
                     }
@@ -2158,6 +2162,11 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                 .default_open(app.live_sessions.list.is_empty())
                 .show(ui, |ui| {
                     let (cli, desktop) = mcp_setup_commands();
+                    ui.label(
+                        "Configure uma vez; o mesmo comando serve para editar este desenho \
+                         (com a edição por IA ligada) e para editar arquivos.",
+                    );
+                    ui.add_space(4.0);
                     ui.label("Claude Code, no terminal:");
                     ui.horizontal(|ui| {
                         ui.add(egui::Label::new(RichText::new(&cli).monospace()).wrap());
@@ -2177,8 +2186,9 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                     });
                     ui.label(
                         RichText::new(
-                            "Depois, reinicie o assistente. Sem `file`, as ferramentas \
-                             editam este desenho.",
+                            "Depois, reinicie o assistente e peça um desenho. Não informe a \
+                             porta nem um arquivo no comando: com um arquivo depois de mcp, o \
+                             assistente edita esse arquivo em vez deste desenho.",
                         )
                         .weak(),
                     );

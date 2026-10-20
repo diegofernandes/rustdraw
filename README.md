@@ -60,11 +60,19 @@ rustdraw icon rustdraw.png --size 512                           # ícone do app
 
 ## Servidor MCP (para assistentes de IA)
 
-`rustdraw mcp` é um servidor [MCP](https://modelcontextprotocol.io) local: um assistente como o Claude Desktop ou o Claude Code consegue ler, desenhar, editar e exportar desenhos pelo RustDraw. O cliente inicia o processo e conversa pelo stdin/stdout; nada usa a rede.
+`rustdraw mcp` é um servidor [MCP](https://modelcontextprotocol.io) local: um assistente como o Claude Desktop ou o Claude Code consegue ler, desenhar, editar e exportar desenhos pelo RustDraw. O assistente inicia o `rustdraw mcp` e conversa com ele pelo stdin/stdout. Ele trabalha de dois jeitos, com a mesma configuração:
+
+- **No desenho aberto no editor**: com o RustDraw aberto e **Permitir edição por IA (MCP)** ligado no menu (☰), o `rustdraw mcp` se conecta ao editor e as mudanças aparecem na hora. Veja [Editar o desenho aberto no editor](#editar-o-desenho-aberto-no-editor).
+- **Num arquivo**: quando a ferramenta recebe `file`, ela edita o `.excalidraw` direto, sem precisar do editor. Veja [Editar um arquivo](#editar-um-arquivo).
+
+Nada sai do computador: a conexão com o editor usa só `127.0.0.1`.
+
+### Configurar o assistente
+
+O jeito mais fácil é pelo próprio editor: no menu (☰), clique em **Como configurar o assistente…** (ou em **Ver conexões** com a opção ligada). O painel **Edição por IA** mostra os comandos abaixo já com o caminho do seu executável e um botão **Copiar**. Depois de configurar, reinicie o assistente.
 
 ```bash
 claude mcp add rustdraw -- /caminho/para/rustdraw mcp            # Claude Code
-claude mcp add rustdraw -- /caminho/para/rustdraw mcp ~/d.excalidraw   # com arquivo padrão
 ```
 
 No Claude Desktop, em `claude_desktop_config.json`:
@@ -76,6 +84,10 @@ No Claude Desktop, em `claude_desktop_config.json`:
   }
 }
 ```
+
+Não precisa informar a porta que o editor mostra: ela muda a cada vez que a opção é ligada, e o `rustdraw mcp` a descobre sozinho. No macOS o executável fica em `RustDraw.app/Contents/MacOS/rustdraw`.
+
+Para trabalhar sempre num mesmo arquivo, passe o caminho depois de `mcp` (`claude mcp add rustdraw -- /caminho/para/rustdraw mcp ~/d.excalidraw`). Com um arquivo padrão, as ferramentas editam esse arquivo em vez do desenho aberto no editor.
 
 | Ferramenta | O que faz |
 |---|---|
@@ -89,7 +101,7 @@ No Claude Desktop, em `claude_desktop_config.json`:
 
 ### Editar o desenho aberto no editor
 
-Ligue **Permitir edição por IA (MCP)** no menu (☰) do RustDraw. Enquanto ela estiver ligada, as ferramentas chamadas sem `file` agem direto no desenho aberto, mesmo que ele ainda não tenha sido salvo: cada mudança aparece na hora e o Ctrl+Z desfaz o que a IA fez. A opção fica lembrada entre uma sessão e outra.
+Ligue **Permitir edição por IA (MCP)** no menu (☰) do RustDraw e configure o assistente com o comando acima (sem arquivo padrão). Enquanto ela estiver ligada, as ferramentas chamadas sem `file` agem direto no desenho aberto, mesmo que ele ainda não tenha sido salvo: cada mudança aparece na hora e o Ctrl+Z desfaz o que a IA fez. A opção fica lembrada entre uma sessão e outra.
 
 Na primeira vez que um assistente se conecta, o editor pergunta se ele pode editar o desenho: **Permitir** (até fechar o editor ou desligar a opção), **Sempre permitir** (lembrado pelo nome do assistente) ou **Recusar**. Enquanto você não responde, nada é alterado. O indicador no canto inferior direito mostra o endereço (`127.0.0.1:porta`) e abre o painel **Edição por IA**, com os assistentes conectados (dá para revogar), os sempre permitidos e o histórico de pedidos (hora, assistente, ferramenta e resultado).
 
