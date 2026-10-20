@@ -2002,18 +2002,15 @@ fn mode_exit_button(app: &mut App, ctx: &egui::Context) {
         });
 }
 
-/// Comando do Claude Code e configuração do Claude Desktop que apontam para
-/// este executável.
-fn mcp_setup_commands() -> (String, String) {
+/// Comando do Claude Code (MCP por HTTP no endereço do editor, com a chave) e
+/// configuração do Claude Desktop (que inicia o `rustdraw mcp` deste executável).
+fn mcp_setup_commands(url: &str, token: &str) -> (String, String) {
+    let cli = format!(
+        "claude mcp add --transport http rustdraw {url} --header \"Authorization: Bearer {token}\""
+    );
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "rustdraw".into());
-    let quoted = if exe.contains(' ') {
-        format!("\"{exe}\"")
-    } else {
-        exe.clone()
-    };
-    let cli = format!("claude mcp add rustdraw -- {quoted} mcp");
     // montado à mão para manter a ordem e caber no painel
     let desktop = format!(
         "{{\n  \"mcpServers\": {{\n    \"rustdraw\": {{\n      \"command\": {},\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}",
@@ -2087,9 +2084,7 @@ fn live_approval(app: &mut App, ctx: &egui::Context) {
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            ui.label(format!(
-                "{client} quer ler e editar o desenho aberto (pelo rustdraw mcp)."
-            ));
+            ui.label(format!("{client} quer ler e editar o desenho aberto."));
             ui.label(
                 RichText::new(format!(
                     "{} esperando. Tudo o que ele fizer pode ser desfeito com {}.",
@@ -2130,68 +2125,84 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
         .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -56.0))
         .open(&mut open)
         .show(ctx, |ui| {
-            match &app.live {
-                Some(h) => {
-                    ui.label(format!(
-                        "Escutando em 127.0.0.1:{} (só este computador)",
-                        h.port
-                    ));
-                    ui.label(
-                        RichText::new(
-                            "O assistente não usa essa porta direto: o rustdraw mcp acha o \
-                             editor sozinho pelo arquivo mcp-live.json, que guarda a porta e uma \
-                             chave nova a cada vez que a opção é ligada.",
-                        )
-                        .weak(),
-                    );
-                    if ui.button("Desligar a edição por IA").clicked() {
-                        app.set_live(false);
+            let port = app
+                .live
+                .as_ref()
+                .map_or(crate::live::DEFAULT_PORT, |h| h.port);
+            let url = crate::live::mcp_url(port);
+            if app.live.is_some() {
+                ui.horizontal(|ui| {
+                    ui.label("Endereço MCP:");
+                    ui.label(RichText::new(&url).monospace().strong());
+                    if ui.small_button("Copiar").clicked() {
+                        ui.ctx().copy_text(url.clone());
+                        app.toast("Endereço copiado");
                     }
+                });
+                if port != crate::live::DEFAULT_PORT {
+                    ui.label(
+                        RichText::new(format!(
+                            "A porta {} estava ocupada; se você configurou o assistente com \
+                             ela, atualize a configuração.",
+                            crate::live::DEFAULT_PORT
+                        ))
+                        .color(Color32::from_rgb(0xd9, 0x77, 0x06)),
+                    );
                 }
-                None => {
-                    ui.label(
-                        "Edição por IA desligada: o assistente só consegue editar arquivos \
-                         .excalidraw. Ligue para ele editar este desenho.",
-                    );
-                    if ui.button("Ligar").clicked() {
-                        app.set_live(true);
-                    }
+                ui.label(RichText::new("Só aceita conexões deste computador, com a chave.").weak());
+                if ui.button("Desligar a edição por IA").clicked() {
+                    app.set_live(false);
+                }
+            } else {
+                ui.label(
+                    "Edição por IA desligada: o editor não atende assistentes. Ligue para eles \
+                     editarem este desenho.",
+                );
+                if ui.button("Ligar").clicked() {
+                    app.set_live(true);
                 }
             }
             egui::CollapsingHeader::new("Como configurar o assistente")
                 .default_open(app.live_sessions.list.is_empty())
                 .show(ui, |ui| {
-                    let (cli, desktop) = mcp_setup_commands();
-                    ui.label(
-                        "Configure uma vez; o mesmo comando serve para editar este desenho \
-                         (com a edição por IA ligada) e para editar arquivos.",
-                    );
-                    ui.add_space(4.0);
-                    ui.label("Claude Code, no terminal:");
+                    let (cli, desktop) = mcp_setup_commands(&url, &app.live_token);
+                    let mut copied = None;
+                    ui.label("Claude Code, no terminal (conecta direto no endereço acima):");
                     ui.horizontal(|ui| {
                         ui.add(egui::Label::new(RichText::new(&cli).monospace()).wrap());
                         if ui.small_button("Copiar").clicked() {
-                            ui.ctx().copy_text(cli.clone());
-                            app.toast("Comando copiado");
+                            copied = Some((cli.clone(), "Comando copiado"));
                         }
                     });
                     ui.add_space(4.0);
-                    ui.label("Claude Desktop, em claude_desktop_config.json:");
+                    ui.label(
+                        "Claude Desktop e outros que só iniciam programas, em \
+                         claude_desktop_config.json (o rustdraw mcp faz a ponte e também \
+                         edita arquivos com o editor fechado):",
+                    );
                     ui.horizontal(|ui| {
                         ui.add(egui::Label::new(RichText::new(&desktop).monospace()).wrap());
                         if ui.small_button("Copiar").clicked() {
-                            ui.ctx().copy_text(desktop.clone());
-                            app.toast("Configuração copiada");
+                            copied = Some((desktop.clone(), "Configuração copiada"));
                         }
                     });
-                    ui.label(
-                        RichText::new(
-                            "Depois, reinicie o assistente e peça um desenho. Não informe a \
-                             porta nem um arquivo no comando: com um arquivo depois de mcp, o \
-                             assistente edita esse arquivo em vez deste desenho.",
-                        )
-                        .weak(),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(
+                                "Depois, reinicie o assistente. A chave fica guardada; \
+                                 trocá-la desconecta quem usa a antiga.",
+                            )
+                            .weak(),
+                        );
+                        if ui.small_button("Trocar chave").clicked() {
+                            app.live_new_token();
+                        }
+                    });
+                    if let Some((text, msg)) = copied {
+                        ui.ctx().copy_text(text);
+                        app.keep_settings();
+                        app.toast(msg);
+                    }
                 });
             section(ui, "Assistentes nesta sessão");
             if app.live_sessions.list.is_empty() {
@@ -2853,9 +2864,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn mcp_setup_commands_point_to_this_exe() {
-        let (cli, desktop) = mcp_setup_commands();
-        assert!(cli.starts_with("claude mcp add rustdraw -- ") && cli.ends_with(" mcp"));
+    fn mcp_setup_commands_point_to_the_editor() {
+        let (cli, desktop) = mcp_setup_commands("http://127.0.0.1:7470/mcp", "abc");
+        assert_eq!(
+            cli,
+            "claude mcp add --transport http rustdraw http://127.0.0.1:7470/mcp \
+             --header \"Authorization: Bearer abc\""
+        );
         let v: serde_json::Value = serde_json::from_str(&desktop).unwrap();
         assert_eq!(v["mcpServers"]["rustdraw"]["args"], json!(["mcp"]));
         assert!(v["mcpServers"]["rustdraw"]["command"].is_string());

@@ -60,19 +60,22 @@ rustdraw icon rustdraw.png --size 512                           # ícone do app
 
 ## Servidor MCP (para assistentes de IA)
 
-`rustdraw mcp` é um servidor [MCP](https://modelcontextprotocol.io) local: um assistente como o Claude Desktop ou o Claude Code consegue ler, desenhar, editar e exportar desenhos pelo RustDraw. O assistente inicia o `rustdraw mcp` e conversa com ele pelo stdin/stdout. Ele trabalha de dois jeitos, com a mesma configuração:
+O RustDraw fala [MCP](https://modelcontextprotocol.io): um assistente como o Claude Code ou o Claude Desktop consegue ler, desenhar, editar e exportar desenhos. Há dois jeitos de conectar:
 
-- **No desenho aberto no editor**: com o RustDraw aberto e **Permitir edição por IA (MCP)** ligado no menu (☰), o `rustdraw mcp` se conecta ao editor e as mudanças aparecem na hora. Veja [Editar o desenho aberto no editor](#editar-o-desenho-aberto-no-editor).
-- **Num arquivo**: quando a ferramenta recebe `file`, ela edita o `.excalidraw` direto, sem precisar do editor. Veja [Editar um arquivo](#editar-um-arquivo).
+- **Direto no editor (HTTP)**: com **Permitir edição por IA (MCP)** ligado no menu (☰), o próprio editor é o servidor MCP em `http://127.0.0.1:7470/mcp`. As ferramentas agem no desenho aberto e as mudanças aparecem na hora. Veja [Editar o desenho aberto no editor](#editar-o-desenho-aberto-no-editor).
+- **Pelo `rustdraw mcp` (stdio)**: o assistente inicia o `rustdraw mcp` e conversa pelo stdin/stdout. É o jeito para quem só inicia programas, como o Claude Desktop. Ele edita arquivos `.excalidraw` mesmo com o editor fechado e, quando o editor está aberto com a opção ligada, repassa as chamadas sem `file` para ele.
 
-Nada sai do computador: a conexão com o editor usa só `127.0.0.1`.
+Nada sai do computador: o editor só aceita conexões de `127.0.0.1`.
 
 ### Configurar o assistente
 
-O jeito mais fácil é pelo próprio editor: no menu (☰), clique em **Como configurar o assistente…** (ou em **Ver conexões** com a opção ligada). O painel **Edição por IA** mostra os comandos abaixo já com o caminho do seu executável e um botão **Copiar**. Depois de configurar, reinicie o assistente.
+O jeito mais fácil é pelo próprio editor: no menu (☰), clique em **Como configurar o assistente…** (ou em **Ver conexões** com a opção ligada). O painel **Edição por IA** mostra os comandos abaixo já com o endereço, a chave e o caminho do seu executável, com um botão **Copiar**. Depois de configurar, reinicie o assistente.
+
+No Claude Code, conectando direto no editor:
 
 ```bash
-claude mcp add rustdraw -- /caminho/para/rustdraw mcp            # Claude Code
+claude mcp add --transport http rustdraw http://127.0.0.1:7470/mcp \
+  --header "Authorization: Bearer <chave do painel>"
 ```
 
 No Claude Desktop, em `claude_desktop_config.json`:
@@ -85,9 +88,9 @@ No Claude Desktop, em `claude_desktop_config.json`:
 }
 ```
 
-Não precisa informar a porta que o editor mostra: ela muda a cada vez que a opção é ligada, e o `rustdraw mcp` a descobre sozinho. No macOS o executável fica em `RustDraw.app/Contents/MacOS/rustdraw`.
+A chave fica guardada entre uma sessão e outra; o botão **Trocar chave** do painel gera outra (quem usa a antiga deixa de conseguir editar). A porta é sempre 7470; se ela estiver ocupada por outro programa, o editor usa outra e avisa no painel. No macOS o executável fica em `RustDraw.app/Contents/MacOS/rustdraw`.
 
-Para trabalhar sempre num mesmo arquivo, passe o caminho depois de `mcp` (`claude mcp add rustdraw -- /caminho/para/rustdraw mcp ~/d.excalidraw`). Com um arquivo padrão, as ferramentas editam esse arquivo em vez do desenho aberto no editor.
+Para editar arquivos sem o editor aberto, use o `rustdraw mcp` também no Claude Code (`claude mcp add rustdraw -- /caminho/para/rustdraw mcp`), passando `file` nas ferramentas. Com um caminho depois de `mcp` (`... mcp ~/d.excalidraw`), as ferramentas editam esse arquivo em vez do desenho aberto no editor.
 
 | Ferramenta | O que faz |
 |---|---|
@@ -101,11 +104,11 @@ Para trabalhar sempre num mesmo arquivo, passe o caminho depois de `mcp` (`claud
 
 ### Editar o desenho aberto no editor
 
-Ligue **Permitir edição por IA (MCP)** no menu (☰) do RustDraw e configure o assistente com o comando acima (sem arquivo padrão). Enquanto ela estiver ligada, as ferramentas chamadas sem `file` agem direto no desenho aberto, mesmo que ele ainda não tenha sido salvo: cada mudança aparece na hora e o Ctrl+Z desfaz o que a IA fez. A opção fica lembrada entre uma sessão e outra.
+Ligue **Permitir edição por IA (MCP)** no menu (☰) do RustDraw e configure o assistente como acima. Enquanto ela estiver ligada, as ferramentas chamadas sem `file` agem direto no desenho aberto, mesmo que ele ainda não tenha sido salvo: cada mudança aparece na hora e o Ctrl+Z desfaz o que a IA fez. A opção fica lembrada entre uma sessão e outra.
 
 Na primeira vez que um assistente se conecta, o editor pergunta se ele pode editar o desenho: **Permitir** (até fechar o editor ou desligar a opção), **Sempre permitir** (lembrado pelo nome do assistente) ou **Recusar**. Enquanto você não responde, nada é alterado. O indicador no canto inferior direito mostra o endereço (`127.0.0.1:porta`) e abre o painel **Edição por IA**, com os assistentes conectados (dá para revogar), os sempre permitidos e o histórico de pedidos (hora, assistente, ferramenta e resultado).
 
-Por baixo, o editor escuta só em `127.0.0.1`, numa porta qualquer, e anota a porta e uma chave aleatória (nova a cada vez que a opção é ligada) em `mcp-live.json`, na pasta de dados do RustDraw; o `rustdraw mcp` lê esse arquivo para achar o editor. Ao desligar a opção ou fechar o editor, o arquivo é apagado.
+Por baixo, o editor escuta só em `127.0.0.1` e só atende quem manda a chave (`Authorization: Bearer ...`); pedidos vindos de páginas da web (com `Origin` de outro site) são recusados. Ele também anota a porta e a chave em `mcp-live.json`, na pasta de dados do RustDraw, para o `rustdraw mcp` achar o editor. Ao desligar a opção ou fechar o editor, o arquivo é apagado.
 
 ### Editar um arquivo
 
@@ -159,7 +162,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
 | `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |
-| `src/live.rs` | Conexão local entre o `rustdraw mcp` e o editor aberto |
+| `src/live.rs` | Endereço MCP (HTTP) do editor e ponte com o `rustdraw mcp` |
 | `src/watch.rs` | Percebe quando outro programa altera o arquivo aberto |
 
 As três saídas (tela, PNG e SVG) usam as mesmas primitivas geradas em `geom.rs`, então o que se vê é o que se exporta.
