@@ -34,6 +34,43 @@ enum Icon {
     Redo,
 }
 
+/// Rótulos de atalho com os nomes das teclas do sistema: no macOS, "Ctrl"
+/// vira "Cmd" e "Alt" vira "Option", como no Excalidraw. Os atalhos em si já
+/// usam `Modifiers::COMMAND`, que é a tecla Command no macOS.
+pub fn keys(s: &str) -> String {
+    keys_for(s, cfg!(target_os = "macos"))
+}
+
+fn keys_for(s: &str, mac: bool) -> String {
+    if !mac {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut rest = s;
+    while !rest.is_empty() {
+        let at_word = !out.chars().next_back().is_some_and(char::is_alphanumeric);
+        let found = [("Ctrl", "Cmd"), ("Alt", "Option")]
+            .into_iter()
+            .find(|(from, _)| {
+                at_word
+                    && rest.starts_with(from)
+                    && !rest[from.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphanumeric)
+            });
+        if let Some((from, to)) = found {
+            out.push_str(to);
+            rest = &rest[from.len()..];
+        } else {
+            let c = rest.chars().next().unwrap();
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
 fn panel_frame(ui: &Ui) -> Frame {
     let dark = ui.visuals().dark_mode;
     Frame::new()
@@ -258,7 +295,7 @@ fn icon_button(
         fg(ui)
     };
     paint(ui.painter(), rect, col);
-    resp.on_hover_text(tooltip)
+    resp.on_hover_text(keys(tooltip))
 }
 
 fn swatch(ui: &mut Ui, color: &str, selected: bool, dark: bool) -> Response {
@@ -862,11 +899,22 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                 if has_selection {
                     section(ui, "Camadas");
                     ui.horizontal(|ui| {
+                        let (to_back, to_front) = if cfg!(target_os = "macos") {
+                            (
+                                "Enviar para trás (Ctrl+Alt+[)",
+                                "Trazer para frente (Ctrl+Alt+])",
+                            )
+                        } else {
+                            (
+                                "Enviar para trás (Ctrl+Shift+[)",
+                                "Trazer para frente (Ctrl+Shift+])",
+                            )
+                        };
                         for (front, all, tip) in [
-                            (false, true, "Enviar para trás (Ctrl+Shift+[)"),
+                            (false, true, to_back),
                             (false, false, "Recuar (Ctrl+[)"),
                             (true, false, "Avançar (Ctrl+])"),
-                            (true, true, "Trazer para frente (Ctrl+Shift+])"),
+                            (true, true, to_front),
                         ] {
                             if icon_button(ui, false, 30.0, tip, |p, r, col| {
                                 let b = r.shrink(8.0);
@@ -900,7 +948,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .small_button("Duplicar")
-                            .on_hover_text("Ctrl+D")
+                            .on_hover_text(keys("Ctrl+D"))
                             .clicked()
                         {
                             app.duplicate_selected();
@@ -909,7 +957,10 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                             app.delete_selected();
                         }
                         if app.selected.len() > 1
-                            && ui.small_button("Agrupar").on_hover_text("Ctrl+G").clicked()
+                            && ui
+                                .small_button("Agrupar")
+                                .on_hover_text(keys("Ctrl+G"))
+                                .clicked()
                         {
                             app.group_selected(true);
                         }
@@ -920,7 +971,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                         if grouped
                             && ui
                                 .small_button("Desagrupar")
-                                .on_hover_text("Ctrl+Shift+G")
+                                .on_hover_text(keys("Ctrl+Shift+G"))
                                 .clicked()
                         {
                             app.group_selected(false);
@@ -1024,7 +1075,7 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 let mut item = |ui: &mut Ui, label: &str, shortcut: &str| {
                     let r = ui.add(
                         egui::Button::new(label)
-                            .shortcut_text(shortcut)
+                            .shortcut_text(keys(shortcut))
                             .frame(false)
                             .min_size(vec2(224.0, 26.0)),
                     );
@@ -1056,27 +1107,27 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                     app.show_help = true;
                 }
                 ui.separator();
-                ui.checkbox(&mut app.dark, "Tema escuro  (Alt+Shift+D)");
+                ui.checkbox(&mut app.dark, keys("Tema escuro  (Alt+Shift+D)"));
                 let mut grid = app.grid;
-                if ui.checkbox(&mut grid, "Grade  (Ctrl+')").changed() {
+                if ui.checkbox(&mut grid, keys("Grade  (Ctrl+')")).changed() {
                     app.toggle_grid();
                 }
                 let mut snap = app.snap;
                 if ui
-                    .checkbox(&mut snap, "Encaixar em objetos  (Alt+S)")
+                    .checkbox(&mut snap, keys("Encaixar em objetos  (Alt+S)"))
                     .changed()
                 {
                     app.toggle_snap();
                 }
-                ui.checkbox(&mut app.zen_mode, "Modo zen  (Alt+Z)");
+                ui.checkbox(&mut app.zen_mode, keys("Modo zen  (Alt+Z)"));
                 let mut view_mode = app.view_mode;
                 if ui
-                    .checkbox(&mut view_mode, "Modo de visualização  (Alt+R)")
+                    .checkbox(&mut view_mode, keys("Modo de visualização  (Alt+R)"))
                     .changed()
                 {
                     app.toggle_view_mode();
                 }
-                ui.checkbox(&mut app.show_stats, "Estatísticas  (Alt+/)");
+                ui.checkbox(&mut app.show_stats, keys("Estatísticas  (Alt+/)"));
                 let mut live = app.live.is_some();
                 if ui
                     .checkbox(&mut live, "Permitir edição por IA (MCP)")
@@ -1340,7 +1391,7 @@ fn context_menu(app: &mut App, ctx: &egui::Context) {
                             };
                             let r = ui.add(
                                 egui::Button::new(text)
-                                    .shortcut_text(shortcut)
+                                    .shortcut_text(keys(shortcut))
                                     .frame(false)
                                     .min_size(vec2(250.0, 26.0)),
                             );
@@ -1399,7 +1450,9 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                                         .frame(false)
                                         .min_size(vec2(52.0, 30.0)),
                                 )
-                                .on_hover_text("Redefinir zoom (Ctrl+0) · Ajustar à tela: Shift+1")
+                                .on_hover_text(keys(
+                                    "Redefinir zoom (Ctrl+0) · Ajustar à tela: Shift+1",
+                                ))
                                 .clicked()
                             {
                                 app.reset_zoom(view);
@@ -1730,6 +1783,11 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Mover a tela", "Espaço+arrastar · roda"),
                     ("Atalhos de teclado", "?"),
                 ];
+                let (to_back, to_front) = if cfg!(target_os = "macos") {
+                    ("Ctrl+[ · Ctrl+Alt+[", "Ctrl+] · Ctrl+Alt+]")
+                } else {
+                    ("Ctrl+[ · Ctrl+Shift+[", "Ctrl+] · Ctrl+Shift+]")
+                };
                 let editor: &[(&str, &str)] = &[
                     ("Limpar o canvas", "Ctrl+Delete"),
                     ("Apagar", "Delete"),
@@ -1738,8 +1796,8 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Adicionar à seleção", "Shift+clique"),
                     ("Copiar como PNG", "Shift+Alt+C"),
                     ("Copiar / colar estilos", "Ctrl+Alt+C / V"),
-                    ("Enviar para trás / para o fundo", "Ctrl+[ · Ctrl+Shift+["),
-                    ("Trazer para frente / ao topo", "Ctrl+] · Ctrl+Shift+]"),
+                    ("Enviar para trás / para o fundo", to_back),
+                    ("Trazer para frente / ao topo", to_front),
                     ("Alinhar", "Ctrl+Shift+setas"),
                     ("Duplicar", "Ctrl+D · Alt+arrastar"),
                     ("Travar / destravar", "Ctrl+Shift+L"),
@@ -1764,7 +1822,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     egui::Grid::new(id).num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                         for (a, b) in rows {
                             ui.label(*a);
-                            ui.label(RichText::new(*b).monospace().size(11.5));
+                            ui.label(RichText::new(keys(b)).monospace().size(11.5));
                             ui.end_row();
                         }
                     });
@@ -1776,7 +1834,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
             });
             ui.add_space(6.0);
             ui.label(
-                RichText::new("Arquivos .excalidraw abrem e salvam no mesmo formato do excalidraw.com. Copiar (Ctrl+C) gera JSON que pode ser colado lá também.")
+                RichText::new(keys("Arquivos .excalidraw abrem e salvam no mesmo formato do excalidraw.com. Copiar (Ctrl+C) gera JSON que pode ser colado lá também."))
                     .size(11.5)
                     .color(ui.visuals().weak_text_color()),
             );
@@ -1821,7 +1879,9 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label("Isto vai apagar todo o canvas. Você pode desfazer com Ctrl+Z.");
+                ui.label(keys(
+                    "Isto vai apagar todo o canvas. Você pode desfazer com Ctrl+Z.",
+                ));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Limpar").clicked() {
@@ -1849,7 +1909,9 @@ fn confirm_window(app: &mut App, ctx: &egui::Context) {
                 ui.label(format!(
                     "Outro programa alterou {name}, mas o desenho aberto tem alterações não salvas."
                 ));
-                ui.label("Recarregar troca o desenho pelo do arquivo (Ctrl+Z volta ao seu).");
+                ui.label(keys(
+                    "Recarregar troca o desenho pelo do arquivo (Ctrl+Z volta ao seu).",
+                ));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Recarregar").clicked() {
@@ -1937,7 +1999,7 @@ fn hint(app: &App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.add(
                 egui::Label::new(
-                    RichText::new(text)
+                    RichText::new(keys(text))
                         .size(12.0)
                         .color(ui.visuals().weak_text_color()),
                 )
@@ -1990,7 +2052,7 @@ fn mode_exit_button(app: &mut App, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     if ui
                         .add(
-                            egui::Button::new(label)
+                            egui::Button::new(keys(label))
                                 .frame(false)
                                 .min_size(vec2(0.0, 30.0)),
                         )
@@ -2568,4 +2630,23 @@ fn library_edit_banner(app: &mut App, ctx: &egui::Context) {
                     });
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keys_for;
+
+    #[test]
+    fn keys_use_mac_names_only_on_mac() {
+        assert_eq!(keys_for("Ctrl+Shift+Z", false), "Ctrl+Shift+Z");
+        assert_eq!(keys_for("Ctrl+Shift+Z", true), "Cmd+Shift+Z");
+        assert_eq!(keys_for("Ctrl+Alt+C / V", true), "Cmd+Option+C / V");
+        assert_eq!(keys_for("Ctrl++ · Ctrl+-", true), "Cmd++ · Cmd+-");
+        assert_eq!(
+            keys_for("Shift mantém a proporção · Alt a partir do centro", true),
+            "Shift mantém a proporção · Option a partir do centro"
+        );
+        // palavras que só começam com "Alt" ficam como estão
+        assert_eq!(keys_for("Altera o desenho", true), "Altera o desenho");
+    }
 }
