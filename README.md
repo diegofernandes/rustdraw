@@ -16,6 +16,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Pontos de edição**: numa linha ou seta selecionada, arraste a alça do meio de um segmento (ou dê duplo clique na linha) para criar um ponto; clique nos pontos para selecioná-los (Shift soma), arraste para mover e `Delete` apaga. Em setas em cotovelo, arraste o meio de um segmento para deslocá-lo (ele fica fixo); duplo clique nessa alça devolve o segmento à rota automática
 - **Setas que grudam nas formas**: a ponta da seta liga num retângulo, losango, elipse ou texto e acompanha a forma quando ela é movida, redimensionada ou girada. Perto do meio de um lado, encaixa nesse **ponto fixo**; no resto da forma fica **livre**, mirando o centro e parando no contorno. Segure `Ctrl` (`Cmd` no macOS) ao arrastar para não grudar; mover só a seta a solta
 - **Frames**: áreas nomeadas (ferramenta `F`) para montar várias telas ou slides num desenho só. O que fica dentro do frame é recortado pela borda dele e anda junto quando ele é movido; arrastar um elemento para dentro ou para fora de um frame o coloca ou tira dele. Duplo clique no nome (ou `Enter` com o frame selecionado) renomeia. Apagar ou duplicar o frame leva o conteúdo junto. Para exportar um frame sozinho, selecione-o e use "Exportar frame…" no botão direito (ou marque "Somente o frame selecionado" na exportação): sai só o conteúdo, do tamanho exato do frame
+- **Ponteiro laser**: para apresentar (ferramenta `K`, como no Excalidraw). Arrastar deixa um rastro vermelho que some sozinho em um segundo, sem criar elementos nem mexer no histórico. Continua funcionando no modo de visualização se estiver ativo ao entrar nele; `K` de novo volta para a seleção
 - **Biblioteca de formas**: guarde formas e grupos para reutilizar (botão **Biblioteca** no canto superior direito, `+` ou "Adicionar à biblioteca" no botão direito). Clique num item para inserir no centro da tela ou arraste para posicionar; `Shift+clique` marca itens para exportar ou remover. O botão direito num item renomeia, edita no canvas (altere, selecione e clique em "Salvar no item"), reordena, exporta ou remove; também dá para reordenar arrastando um item sobre outro. Remoções e edições podem ser desfeitas no próprio painel. Importa e exporta arquivos `.excalidrawlib` (versões 1 e 2) — dá para usar bibliotecas baixadas do Excalidraw sem depender do site. A biblioteca fica salva localmente no diretório de dados do usuário
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
@@ -119,6 +120,7 @@ Com `file` (ou um arquivo padrão na linha de comando), a ferramenta lê o arqui
 | Ajustar à seleção | `Shift+2` / `Shift+3` | | Limpar o canvas | `Ctrl+Delete` |
 | Frame | `F` | | Renomear frame | `Enter` / duplo clique no nome |
 | Encaixar em objetos | `Alt+S` (`Ctrl` inverte ao arrastar) | | | |
+| Ponteiro laser | `K` | | | |
 
 Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`. O botão direito abre o menu de opções.
 
@@ -137,6 +139,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/library.rs` | Biblioteca de formas no formato `.excalidrawlib` |
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |
 | `src/frame.rs` | Frames: quem está dentro de qual, recorte, nomes |
+| `src/laser.rs` | Ponteiro laser: rastro que afina e some com o tempo |
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
 | `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |

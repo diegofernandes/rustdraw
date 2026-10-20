@@ -17,6 +17,7 @@ mod fonts;
 mod frame;
 mod geom;
 mod label;
+mod laser;
 mod library;
 mod live;
 mod mcp;
