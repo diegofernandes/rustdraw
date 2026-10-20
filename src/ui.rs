@@ -1128,6 +1128,18 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                     app.toggle_view_mode();
                 }
                 ui.checkbox(&mut app.show_stats, keys("Estatísticas  (Alt+/)"));
+                let mut live = app.live.is_some();
+                if ui
+                    .checkbox(&mut live, "Permitir edição por IA (MCP)")
+                    .on_hover_text(
+                        "Deixa um assistente de IA ligado ao `rustdraw mcp` editar este \
+                         desenho enquanto o editor está aberto. Só aceita conexões deste \
+                         computador.",
+                    )
+                    .changed()
+                {
+                    app.set_live(live);
+                }
                 section(ui, "Fundo do canvas");
                 ui.horizontal(|ui| {
                     for c in CANVAS_BGS {

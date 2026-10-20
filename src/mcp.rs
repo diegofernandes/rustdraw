@@ -10,6 +10,7 @@ use crate::edit;
 use crate::export::{self, ExportOpts};
 use crate::fonts;
 use crate::frame;
+use crate::live;
 use crate::model::SceneFile;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
@@ -23,7 +24,9 @@ const INSTRUCTIONS: &str = "Edita desenhos .excalidraw do RustDraw (editor no es
 Use get_scene para ver os elementos e seus ids, add_elements para criar formas, textos e setas \
 (setas ligam em formas com start/end {\"element\": id}), update_elements e delete_elements para \
 mudar, e preview para conferir o resultado como imagem. Imagens entram com add_elements \
-{\"type\": \"image\", \"path\": arquivo PNG/JPG}. Coordenadas em pixels, y cresce para baixo.";
+{\"type\": \"image\", \"path\": arquivo PNG/JPG}. Coordenadas em pixels, y cresce para baixo. \
+Sem `file`, as ferramentas agem no desenho aberto no editor RustDraw (se ele permitir), e o usuário \
+vê cada mudança na hora.";
 
 pub struct Server {
     default_file: Option<PathBuf>,
@@ -131,168 +134,217 @@ impl Server {
             .get("name")
             .and_then(|n| n.as_str())
             .ok_or((-32602, "falta `name`".to_string()))?;
+        if !TOOLS.contains(&name) {
+            return Err((-32602, format!("ferramenta desconhecida: {name}")));
+        }
         let empty = Map::new();
         let args = params
             .get("arguments")
             .and_then(|a| a.as_object())
             .unwrap_or(&empty);
-        let out = match name {
-            "new_scene" => self.new_scene(args),
-            "get_scene" => self.get_scene(args),
-            "add_elements" => self.modify(args, "elements", |els, files, v| {
-                let ids = edit::add(els, files, list(v)?)?;
-                Ok(json!({"added": ids}))
-            }),
-            "update_elements" => self.modify(args, "elements", |els, _, v| {
-                let ids = edit::update(els, list(v)?)?;
-                Ok(json!({"updated": ids}))
-            }),
-            "delete_elements" => self.modify(args, "ids", |els, _, v| {
-                let ids: Vec<String> = serde_json::from_value(v.clone())
-                    .map_err(|_| "`ids` precisa ser uma lista de ids".to_string())?;
-                let n = edit::delete(els, &ids)?;
-                Ok(json!({"deleted": n}))
-            }),
-            "export_image" => self.export_image(args),
-            "preview" => {
-                return Ok(self
-                    .preview(args)
-                    .unwrap_or_else(|e| text_result(json!(e), true)));
-            }
-            _ => return Err((-32602, format!("ferramenta desconhecida: {name}"))),
-        };
-        Ok(match out {
-            Ok(v) => text_result(v, false),
-            Err(e) => text_result(json!(e), true),
+        Ok(match self.target(args) {
+            Some(path) => self.call_file(name, args, &path),
+            None => match live::call(name, args) {
+                Ok(r) => r,
+                Err(live::CallError::Failed(e)) => text_result(json!(e), true),
+                Err(live::CallError::NotRunning) => text_result(json!(NO_TARGET), true),
+            },
         })
     }
 
-    fn file(&self, args: &Map<String, Value>) -> Result<PathBuf, String> {
+    /// Arquivo a editar: o do parâmetro `file` ou o padrão. `None` = o editor aberto.
+    fn target(&self, args: &Map<String, Value>) -> Option<PathBuf> {
         match args.get("file").and_then(|f| f.as_str()) {
-            Some(f) if !f.is_empty() => Ok(PathBuf::from(f)),
-            _ => self
-                .default_file
-                .clone()
-                .ok_or_else(|| "falta `file` (caminho do .excalidraw)".into()),
+            Some(f) if !f.is_empty() => Some(PathBuf::from(f)),
+            _ => self.default_file.clone(),
         }
     }
 
-    fn new_scene(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        let path = self.file(args)?;
-        let overwrite = args.get("overwrite").and_then(|v| v.as_bool()) == Some(true);
-        if path.exists() && !overwrite {
-            return Err(format!(
-                "{} já existe (use overwrite: true para substituir)",
-                path.display()
-            ));
-        }
-        let bg = args
-            .get("background")
-            .and_then(|v| v.as_str())
-            .unwrap_or("#ffffff");
-        edit::save(&path, &SceneFile::new(vec![], bg, false))?;
-        Ok(json!({"created": path.display().to_string()}))
-    }
-
-    fn get_scene(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        let path = self.file(args)?;
-        let scene = edit::load(&path)?;
-        if args.get("raw").and_then(|v| v.as_bool()) == Some(true) {
-            return Ok(json!(scene.to_json()));
-        }
-        let els = &scene.elements;
-        let bounds = export::bounds_with_text(els).map(|b| {
-            json!({"x": b.min.x.round(), "y": b.min.y.round(),
-                   "width": b.width().round(), "height": b.height().round()})
-        });
-        Ok(json!({
-            "file": path.display().to_string(),
-            "viewBackgroundColor": scene.view_background(),
-            "bounds": bounds,
-            "elements": els.iter().map(|e| edit::summary(e, els)).collect::<Vec<_>>(),
-        }))
-    }
-
-    /// Carrega, aplica `f` (tudo ou nada) e grava.
-    fn modify(
-        &self,
-        args: &Map<String, Value>,
-        key: &str,
-        f: impl FnOnce(
-            &mut Vec<crate::model::Element>,
-            &mut Map<String, Value>,
-            &Value,
-        ) -> Result<Value, String>,
-    ) -> Result<Value, String> {
-        let path = self.file(args)?;
-        let v = args.get(key).ok_or_else(|| format!("falta `{key}`"))?;
-        let mut scene = edit::load(&path)?;
-        let mut els = scene.elements.clone();
-        let mut files = scene.files_map();
-        let out = f(&mut els, &mut files, v)?;
-        scene.elements = els;
-        scene.set_files(&files);
-        edit::save(&path, &scene)?;
-        Ok(out)
-    }
-
-    fn opts(scene: &SceneFile, args: &Map<String, Value>, scale: f32) -> ExportOpts {
-        let mut o = ExportOpts {
-            scale: args
-                .get("scale")
-                .and_then(|v| v.as_f64())
-                .map_or(scale, |s| s as f32),
-            dark: args.get("dark").and_then(|v| v.as_bool()) == Some(true),
-            background: args.get("background").and_then(|v| v.as_bool()) != Some(false),
-            ..Default::default()
-        };
-        if let Some(bg) = scene.view_background() {
-            o.view_background = bg;
-        }
-        o.frame = args
-            .get("frame")
-            .and_then(|v| v.as_str())
-            .map(|f| frame::find(&scene.elements, f).unwrap_or_else(|| f.to_string()));
-        o.files = scene.files_map();
-        o
-    }
-
-    fn export_image(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        let scene = edit::load(&self.file(args)?)?;
-        let output = args
-            .get("output")
-            .and_then(|v| v.as_str())
-            .ok_or("falta `output` (caminho .png ou .svg)")?;
-        let opts = Self::opts(&scene, args, 2.0);
-        let lower = output.to_lowercase();
-        let data = if lower.ends_with(".svg") {
-            export::render_svg(&scene.elements, &opts)?.into_bytes()
-        } else if lower.ends_with(".png") {
-            export::render_png(&scene.elements, &opts)?
+    /// Carrega o arquivo, executa a ferramenta (tudo ou nada) e grava se mudou.
+    fn call_file(&self, name: &str, args: &Map<String, Value>, path: &Path) -> Value {
+        let out = if name == "new_scene" {
+            new_scene_file(args, path).map(|v| text_result(v, false))
         } else {
-            return Err("`output` precisa terminar em .png ou .svg".into());
+            edit::load(path).and_then(|mut scene| {
+                let source = path.display().to_string();
+                let (r, changed) = run_tool(name, args, &mut scene, &source)?;
+                if changed {
+                    edit::save(path, &scene)?;
+                }
+                Ok(r)
+            })
         };
-        let out = Path::new(output);
-        if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        std::fs::write(out, &data).map_err(|e| format!("{output}: {e}"))?;
-        Ok(json!({"written": output, "bytes": data.len()}))
+        out.unwrap_or_else(|e| text_result(json!(e), true))
     }
+}
 
-    fn preview(&self, args: &Map<String, Value>) -> Result<Value, String> {
-        let scene = edit::load(&self.file(args)?)?;
-        let mut opts = Self::opts(&scene, args, 1.0);
-        let b = export::export_bounds(&scene.elements, &opts).ok_or("nada para mostrar")?;
-        let side = (b.width().max(b.height()) + opts.padding * 2.0) * opts.scale;
-        if side > PREVIEW_MAX_PX {
-            opts.scale *= PREVIEW_MAX_PX / side;
-        }
-        let png = export::render_png(&scene.elements, &opts)?;
-        Ok(
-            json!({"content": [{"type": "image", "data": fonts::base64(&png), "mimeType": "image/png"}]}),
-        )
+/// Sem arquivo e sem editor aberto com a opção ligada.
+const NO_TARGET: &str = "Nenhum desenho para editar: informe `file` (caminho do .excalidraw) \
+ou abra o RustDraw e ligue \"Permitir edição por IA\" no menu.";
+
+const TOOLS: [&str; 7] = [
+    "new_scene",
+    "get_scene",
+    "add_elements",
+    "update_elements",
+    "delete_elements",
+    "export_image",
+    "preview",
+];
+
+fn new_scene_file(args: &Map<String, Value>, path: &Path) -> Result<Value, String> {
+    let overwrite = args.get("overwrite").and_then(|v| v.as_bool()) == Some(true);
+    if path.exists() && !overwrite {
+        return Err(format!(
+            "{} já existe (use overwrite: true para substituir)",
+            path.display()
+        ));
     }
+    let bg = args
+        .get("background")
+        .and_then(|v| v.as_str())
+        .unwrap_or("#ffffff");
+    edit::save(path, &SceneFile::new(vec![], bg, false))?;
+    Ok(json!({"created": path.display().to_string()}))
+}
+
+/// Executa uma ferramenta sobre uma cena em memória (de um arquivo ou do editor
+/// aberto). Devolve o resultado do `tools/call` e se a cena mudou; num erro a
+/// cena fica como estava. `source` diz de onde a cena veio.
+pub fn run_tool(
+    name: &str,
+    args: &Map<String, Value>,
+    scene: &mut SceneFile,
+    source: &str,
+) -> Result<(Value, bool), String> {
+    let changed = matches!(
+        name,
+        "new_scene" | "add_elements" | "update_elements" | "delete_elements"
+    );
+    let v = match name {
+        "new_scene" => {
+            let bg = args
+                .get("background")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| scene.view_background())
+                .unwrap_or_else(|| "#ffffff".into());
+            *scene = SceneFile::new(vec![], &bg, scene.grid_enabled());
+            json!({"cleared": source})
+        }
+        "get_scene" => get_scene(args, scene, source),
+        "add_elements" => modify(scene, args, "elements", |els, files, v| {
+            let ids = edit::add(els, files, list(v)?)?;
+            Ok(json!({"added": ids}))
+        })?,
+        "update_elements" => modify(scene, args, "elements", |els, _, v| {
+            let ids = edit::update(els, list(v)?)?;
+            Ok(json!({"updated": ids}))
+        })?,
+        "delete_elements" => modify(scene, args, "ids", |els, _, v| {
+            let ids: Vec<String> = serde_json::from_value(v.clone())
+                .map_err(|_| "`ids` precisa ser uma lista de ids".to_string())?;
+            let n = edit::delete(els, &ids)?;
+            Ok(json!({"deleted": n}))
+        })?,
+        "export_image" => export_image(args, scene)?,
+        "preview" => return Ok((preview(args, scene)?, false)),
+        _ => return Err(format!("ferramenta desconhecida: {name}")),
+    };
+    Ok((text_result(v, false), changed))
+}
+
+fn get_scene(args: &Map<String, Value>, scene: &SceneFile, source: &str) -> Value {
+    if args.get("raw").and_then(|v| v.as_bool()) == Some(true) {
+        return json!(scene.to_json());
+    }
+    let els = &scene.elements;
+    let bounds = export::bounds_with_text(els).map(|b| {
+        json!({"x": b.min.x.round(), "y": b.min.y.round(),
+               "width": b.width().round(), "height": b.height().round()})
+    });
+    json!({
+        "file": source,
+        "viewBackgroundColor": scene.view_background(),
+        "bounds": bounds,
+        "elements": els.iter().map(|e| edit::summary(e, els)).collect::<Vec<_>>(),
+    })
+}
+
+/// Aplica `f` numa cópia dos elementos e só a mantém se der certo.
+fn modify(
+    scene: &mut SceneFile,
+    args: &Map<String, Value>,
+    key: &str,
+    f: impl FnOnce(
+        &mut Vec<crate::model::Element>,
+        &mut Map<String, Value>,
+        &Value,
+    ) -> Result<Value, String>,
+) -> Result<Value, String> {
+    let v = args.get(key).ok_or_else(|| format!("falta `{key}`"))?;
+    let mut els = scene.elements.clone();
+    let mut files = scene.files_map();
+    let out = f(&mut els, &mut files, v)?;
+    scene.elements = els;
+    scene.set_files(&files);
+    Ok(out)
+}
+
+fn opts(scene: &SceneFile, args: &Map<String, Value>, scale: f32) -> ExportOpts {
+    let mut o = ExportOpts {
+        scale: args
+            .get("scale")
+            .and_then(|v| v.as_f64())
+            .map_or(scale, |s| s as f32),
+        dark: args.get("dark").and_then(|v| v.as_bool()) == Some(true),
+        background: args.get("background").and_then(|v| v.as_bool()) != Some(false),
+        ..Default::default()
+    };
+    if let Some(bg) = scene.view_background() {
+        o.view_background = bg;
+    }
+    o.frame = args
+        .get("frame")
+        .and_then(|v| v.as_str())
+        .map(|f| frame::find(&scene.elements, f).unwrap_or_else(|| f.to_string()));
+    o.files = scene.files_map();
+    o
+}
+
+fn export_image(args: &Map<String, Value>, scene: &SceneFile) -> Result<Value, String> {
+    let output = args
+        .get("output")
+        .and_then(|v| v.as_str())
+        .ok_or("falta `output` (caminho .png ou .svg)")?;
+    let opts = opts(scene, args, 2.0);
+    let lower = output.to_lowercase();
+    let data = if lower.ends_with(".svg") {
+        export::render_svg(&scene.elements, &opts)?.into_bytes()
+    } else if lower.ends_with(".png") {
+        export::render_png(&scene.elements, &opts)?
+    } else {
+        return Err("`output` precisa terminar em .png ou .svg".into());
+    };
+    let out = Path::new(output);
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(out, &data).map_err(|e| format!("{output}: {e}"))?;
+    Ok(json!({"written": output, "bytes": data.len()}))
+}
+
+fn preview(args: &Map<String, Value>, scene: &SceneFile) -> Result<Value, String> {
+    let mut opts = opts(scene, args, 1.0);
+    let b = export::export_bounds(&scene.elements, &opts).ok_or("nada para mostrar")?;
+    let side = (b.width().max(b.height()) + opts.padding * 2.0) * opts.scale;
+    if side > PREVIEW_MAX_PX {
+        opts.scale *= PREVIEW_MAX_PX / side;
+    }
+    let png = export::render_png(&scene.elements, &opts)?;
+    Ok(
+        json!({"content": [{"type": "image", "data": fonts::base64(&png), "mimeType": "image/png"}]}),
+    )
 }
 
 fn list(v: &Value) -> Result<&[Value], String> {
@@ -302,7 +354,7 @@ fn list(v: &Value) -> Result<&[Value], String> {
 }
 
 fn file_prop() -> Value {
-    json!({"type": "string", "description": "Caminho do arquivo .excalidraw (de preferência absoluto)."})
+    json!({"type": "string", "description": "Caminho do arquivo .excalidraw (de preferência absoluto). Sem ele, edita o desenho aberto no RustDraw (com \"Permitir edição por IA\" ligado no menu)."})
 }
 
 /// Campos aceitos para criar/alterar um elemento.
@@ -364,7 +416,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "new_scene",
-            "description": "Cria um desenho .excalidraw vazio.",
+            "description": "Cria um desenho .excalidraw vazio. Sem `file`, limpa o desenho aberto no editor (o usuário pode desfazer).",
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
                 "background": {"type": "string", "description": "Cor de fundo, padrão #ffffff."},
@@ -508,5 +560,36 @@ mod tests {
         let r = call(&mut s, 7, "new_scene", json!({}));
         assert_eq!(r["isError"], true, "não sobrescreve sem overwrite");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_tool_in_memory() {
+        let mut scene = SceneFile::new(vec![], "#ffffff", false);
+        let args = json!({"elements": [{"type": "ellipse", "id": "e"}]});
+        let (r, changed) =
+            run_tool("add_elements", args.as_object().unwrap(), &mut scene, "app").unwrap();
+        assert!(changed, "{r}");
+        assert_eq!(scene.elements.len(), 1);
+        let (r, changed) = run_tool("get_scene", &Map::new(), &mut scene, "app").unwrap();
+        assert!(!changed);
+        assert!(
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("\"file\":\"app\"")
+        );
+        let bad = json!({"ids": ["x"]});
+        assert!(
+            run_tool(
+                "delete_elements",
+                bad.as_object().unwrap(),
+                &mut scene,
+                "app"
+            )
+            .is_err()
+        );
+        assert_eq!(scene.elements.len(), 1, "erro não muda a cena");
+        let (_, changed) = run_tool("new_scene", &Map::new(), &mut scene, "app").unwrap();
+        assert!(changed && scene.elements.is_empty());
     }
 }

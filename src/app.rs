@@ -7,6 +7,8 @@ use crate::files;
 use crate::frame;
 use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::library::{self, LibraryItem};
+use crate::live;
+use crate::mcp;
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
 use crate::render::{self, Cam, PaintCtx};
 use crate::snap;
@@ -207,6 +209,10 @@ pub struct App {
     /// Acompanha o arquivo aberto, para recarregar quando outro programa o altera.
     watch: Option<Watch>,
     last_watch: f64,
+    /// Escuta o `rustdraw mcp` ("Permitir edição por IA" ligado).
+    pub live: Option<live::Host>,
+    /// Pedidos da IA esperando o fim de um arrasto ou de um texto.
+    live_queue: Vec<live::Request>,
     pub dark: bool,
     pub grid: bool,
     /// Encaixe em objetos (Alt+S), como o "Snap to objects" do Excalidraw.
@@ -397,6 +403,8 @@ impl App {
             dirty: false,
             watch: None,
             last_watch: 0.0,
+            live: None,
+            live_queue: vec![],
             dark: false,
             grid: false,
             snap: false,
@@ -484,6 +492,10 @@ impl App {
                 .get("objectsSnapModeEnabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            if f.app_state.get("rustdrawMcpLive").and_then(|v| v.as_bool()) == Some(true) {
+                app.set_live(true);
+                app.toast = None;
+            }
             app.apply_scene(f);
         }
         app
@@ -1080,6 +1092,80 @@ impl App {
         }
     }
 
+    /// Liga ou desliga a edição do desenho aberto pelo `rustdraw mcp`.
+    pub fn set_live(&mut self, on: bool) {
+        if on == self.live.is_some() {
+            return;
+        }
+        if on {
+            let ctx = self.ctx.clone();
+            match live::Host::start(move || ctx.request_repaint()) {
+                Ok(h) => {
+                    self.live = Some(h);
+                    self.toast("Edição por IA ligada: o rustdraw mcp agora edita este desenho");
+                }
+                Err(e) => self.toast(format!("Não foi possível ligar a edição por IA: {e}")),
+            }
+        } else {
+            self.live = None;
+            for req in self.live_queue.drain(..) {
+                req.respond(Err("a edição por IA foi desligada no editor".into()));
+            }
+            self.toast("Edição por IA desligada");
+        }
+        self.autosave_pending = true;
+        self.last_change = self.now;
+    }
+
+    /// Atende os pedidos do `rustdraw mcp` no desenho aberto. Cada mudança entra
+    /// no histórico, então Ctrl+Z desfaz o que a IA fez.
+    fn poll_live(&mut self) {
+        let Some(host) = &self.live else { return };
+        self.live_queue.extend(host.rx.try_iter());
+        if self.live_queue.is_empty() {
+            return;
+        }
+        if !matches!(self.drag, Drag::None) || self.editing.is_some() {
+            self.ctx
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        let source = match &self.file_path {
+            Some(p) => p.display().to_string(),
+            None => "desenho aberto no RustDraw (ainda sem arquivo)".into(),
+        };
+        let mut changed = false;
+        for req in std::mem::take(&mut self.live_queue) {
+            let mut scene = self.scene_file();
+            match mcp::run_tool(&req.name, &req.args, &mut scene, &source) {
+                Ok((r, c)) => {
+                    if c {
+                        self.apply_live(scene);
+                        changed = true;
+                    }
+                    req.respond(Ok(r));
+                }
+                Err(e) => req.respond(Err(e)),
+            }
+        }
+        if changed {
+            self.toast(crate::ui::keys("Desenho alterado pela IA (Ctrl+Z desfaz)"));
+        }
+    }
+
+    fn apply_live(&mut self, scene: SceneFile) {
+        // imagens antigas ficam, para que desfazer as traga de volta
+        self.files.extend(scene.files_map());
+        if let Some(bg) = scene.view_background() {
+            self.view_bg = bg;
+        }
+        let before = std::mem::replace(&mut self.elements, scene.elements);
+        let ids: HashSet<String> = self.elements.iter().map(|e| e.id.clone()).collect();
+        self.selected.retain(|s| ids.contains(s));
+        self.bind_hint = None;
+        self.commit(before);
+    }
+
     /// Troca a cena pelo conteúdo do arquivo no disco (lido agora, se `text` for `None`).
     ///
     /// Diferente de abrir: mantém a câmera e a seleção, e entra no histórico,
@@ -1201,6 +1287,7 @@ impl App {
                 if self.dark { "dark" } else { "light" }.into(),
             );
             obj.insert("objectsSnapModeEnabled".into(), self.snap.into());
+            obj.insert("rustdrawMcpLive".into(), self.live.is_some().into());
         }
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -4133,6 +4220,7 @@ impl App {
         self.now = ctx.input(|i| i.time);
         self.poll_dialog();
         self.poll_watch(ctx);
+        self.poll_live();
         let prefs = (self.dark, self.grid, self.snap, self.view_bg.clone());
         if self.last_prefs.as_ref() != Some(&prefs) {
             if self.last_prefs.is_some() {

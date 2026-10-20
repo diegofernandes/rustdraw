@@ -56,7 +56,7 @@ rustdraw export slides.excalidraw tela1.png --frame "Tela 1"   # só um frame
 
 ## Servidor MCP (para assistentes de IA)
 
-`rustdraw mcp` é um servidor [MCP](https://modelcontextprotocol.io) local: um assistente como o Claude Desktop ou o Claude Code consegue ler, desenhar, editar e exportar arquivos `.excalidraw` pelo RustDraw. Ele conversa só pelo stdin/stdout do processo que o cliente inicia, sem abrir porta nem usar a rede.
+`rustdraw mcp` é um servidor [MCP](https://modelcontextprotocol.io) local: um assistente como o Claude Desktop ou o Claude Code consegue ler, desenhar, editar e exportar desenhos pelo RustDraw. O cliente inicia o processo e conversa pelo stdin/stdout; nada usa a rede.
 
 ```bash
 claude mcp add rustdraw -- /caminho/para/rustdraw mcp            # Claude Code
@@ -83,9 +83,15 @@ No Claude Desktop, em `claude_desktop_config.json`:
 | `export_image` | Grava PNG ou SVG (do desenho todo ou de um frame, em `frame`) |
 | `preview` | Devolve um PNG do desenho (ou de um frame) para o assistente conferir o resultado |
 
-Com o arquivo aberto no editor, as mudanças feitas pelo MCP (ou por qualquer outro programa) aparecem sozinhas. Se o desenho aberto tiver alterações não salvas, o editor pergunta se deve recarregar ou manter o seu; Ctrl+Z desfaz a recarga.
+### Editar o desenho aberto no editor
 
-Cada ferramenta recebe o caminho do arquivo em `file` (opcional se um arquivo padrão foi passado na linha de comando), lê, aplica a mudança e grava. Um lote com erro não grava nada. Se o mesmo arquivo estiver aberto no editor, reabra-o para ver as mudanças.
+Ligue **Permitir edição por IA (MCP)** no menu (☰) do RustDraw. Enquanto ela estiver ligada, as ferramentas chamadas sem `file` agem direto no desenho aberto, mesmo que ele ainda não tenha sido salvo: cada mudança aparece na hora e o Ctrl+Z desfaz o que a IA fez. A opção fica lembrada entre uma sessão e outra.
+
+Por baixo, o editor escuta só em `127.0.0.1`, numa porta qualquer, e anota a porta e uma chave aleatória em `mcp-live.json`, na pasta de dados do RustDraw; o `rustdraw mcp` lê esse arquivo para achar o editor. Ao desligar a opção ou fechar o editor, o arquivo é apagado.
+
+### Editar um arquivo
+
+Com `file` (ou um arquivo padrão na linha de comando), a ferramenta lê o arquivo, aplica a mudança e grava; um lote com erro não grava nada. Se esse arquivo estiver aberto no editor, as mudanças aparecem sozinhas. Se o desenho aberto tiver alterações não salvas, o editor pergunta se deve recarregar ou manter o seu; Ctrl+Z desfaz a recarga.
 
 ## Atalhos
 
@@ -132,6 +138,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
 | `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |
+| `src/live.rs` | Conexão local entre o `rustdraw mcp` e o editor aberto |
 | `src/watch.rs` | Percebe quando outro programa altera o arquivo aberto |
 
 As três saídas (tela, PNG e SVG) usam as mesmas primitivas geradas em `geom.rs`, então o que se vê é o que se exporta.
