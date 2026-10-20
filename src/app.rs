@@ -7,6 +7,7 @@ use crate::files;
 use crate::frame;
 use crate::geom::{self, P, Prim, Rect, rotate};
 use crate::label;
+use crate::laser::Laser;
 use crate::library::{self, LibraryItem};
 use crate::live;
 use crate::mcp;
@@ -40,6 +41,7 @@ pub enum Tool {
     Text,
     Eraser,
     Frame,
+    Laser,
 }
 
 impl Tool {
@@ -134,6 +136,8 @@ pub enum Drag {
         last: P,
         marked: HashSet<String>,
     },
+    /// Ponteiro laser: o rastro fica em `App::laser`, não nos elementos.
+    Laser,
 }
 
 pub struct TextEditing {
@@ -230,6 +234,8 @@ pub struct App {
     pub show_stats: bool,
     pub zen_mode: bool,
     pub view_mode: bool,
+    /// Rastro do ponteiro laser (K).
+    pub laser: Laser,
     /// Abre o seletor de cor do traço (`Some(false)`) ou do fundo (`Some(true)`) — atalhos S e G.
     pub open_picker: Option<bool>,
     /// Estilo copiado com Ctrl+Alt+C.
@@ -419,6 +425,7 @@ impl App {
             show_stats: false,
             zen_mode: false,
             view_mode: false,
+            laser: Laser::default(),
             open_picker: None,
             copied_style: None,
             export_opts: ExportOpts::default(),
@@ -2861,7 +2868,8 @@ impl App {
                     return;
                 }
             }
-            if space || self.tool == Tool::Hand || self.view_mode {
+            let pans = self.tool == Tool::Hand || (self.view_mode && self.tool != Tool::Laser);
+            if space || pans {
                 self.drag = Drag::Pan { last: pos };
             } else {
                 self.on_press(wp, pos, mods);
@@ -2897,7 +2905,9 @@ impl App {
         let cursor = match (&self.drag, self.tool) {
             (Drag::Pan { .. }, _) => CursorIcon::Grabbing,
             (_, Tool::Hand) => CursorIcon::Grab,
-            _ if space || self.view_mode => CursorIcon::Grab,
+            _ if space => CursorIcon::Grab,
+            (_, Tool::Laser) if over => CursorIcon::Crosshair,
+            _ if self.view_mode => CursorIcon::Grab,
             (Drag::Move { .. }, _) => CursorIcon::Move,
             (_, Tool::Select) if over && self.frame_label_at(pos).is_some() => CursorIcon::Move,
             (_, Tool::Select) if over => match self.handle_at(pos) {
@@ -3129,6 +3139,10 @@ impl App {
                 let marked = frame::with_children(&self.elements, &marked);
                 self.drag = Drag::Erase { last: p, marked };
             }
+            Tool::Laser => {
+                self.laser.start(p, self.now);
+                self.drag = Drag::Laser;
+            }
         }
     }
 
@@ -3168,6 +3182,7 @@ impl App {
         self.snap_guides.clear();
         match &mut self.drag {
             Drag::None => {}
+            Drag::Laser => self.laser.add(p, self.now),
             Drag::Pan { last } => {
                 let d = screen - *last;
                 *last = screen;
@@ -3610,6 +3625,7 @@ impl App {
                 }
             }
             Drag::LinearMulti { id, before } => self.drag = Drag::LinearMulti { id, before },
+            Drag::Laser => self.laser.end(),
             Drag::None | Drag::Pan { .. } | Drag::BoxSelect { .. } => {}
         }
     }
@@ -3915,12 +3931,16 @@ impl App {
             (Key::E, Tool::Eraser),
             (Key::Num0, Tool::Eraser),
             (Key::F, Tool::Frame),
+            // K alterna entre o laser e a seleção
+            (Key::K, Tool::Laser),
         ];
         for (key, tool) in tools {
             if k(n, key) {
                 // mão e borracha alternam de volta para a ferramenta anterior
                 if matches!(tool, Tool::Hand | Tool::Eraser) && self.tool == tool {
                     self.set_tool(self.prev_tool);
+                } else if tool == Tool::Laser && self.tool == tool {
+                    self.set_tool(Tool::Select);
                 } else {
                     self.set_tool(tool);
                 }
@@ -4175,6 +4195,11 @@ impl App {
                 sel_stroke,
                 StrokeKind::Middle,
             );
+        }
+        self.laser.prune(self.now);
+        if self.laser.active() {
+            painter.extend(self.laser.shapes(self.now, |p| self.cam.s(p)));
+            ui.ctx().request_repaint();
         }
     }
 

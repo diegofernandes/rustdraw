@@ -28,6 +28,7 @@ enum Icon {
     Image,
     Eraser,
     Frame,
+    Laser,
     Lock(bool),
     Menu,
     Undo,
@@ -215,6 +216,25 @@ fn paint_icon(p: &Painter, r: Rect, icon: Icon, col: Color32) {
             for t in [0.25, 0.75] {
                 p.line_segment([rel(r, 0.05, t), rel(r, 0.95, t)], s);
                 p.line_segment([rel(r, t, 0.05), rel(r, t, 0.95)], s);
+            }
+        }
+        Icon::Laser => {
+            // caneta em diagonal com raios saindo da ponta, como no Excalidraw
+            p.add(Shape::closed_line(
+                pts(&[(0.48, 0.64), (0.92, 0.2), (0.8, 0.08), (0.36, 0.52)]),
+                s,
+            ));
+            let tip = rel(r, 0.3, 0.7);
+            let w = r.width();
+            for (dx, dy) in [
+                (-1.0, 0.0),
+                (-0.87, -0.5),
+                (-0.71, 0.71),
+                (0.0, 1.0),
+                (0.5, 0.87),
+            ] {
+                let d = vec2(dx, dy) * w;
+                p.line_segment([tip + d * 0.12, tip + d * 0.24], s);
             }
         }
         Icon::Lock(locked) => {
@@ -984,7 +1004,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
 
 fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
     egui::Area::new(Id::unique("toolbar"))
-        .fixed_pos(pos2(view.center().x - 246.0, 12.0))
+        .fixed_pos(pos2(view.center().x - 264.0, 12.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             panel_frame(ui).show(ui, |ui| {
@@ -1017,6 +1037,7 @@ fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
                         (Tool::Select, Icon::Image, "Inserir imagem (9)", "9"),
                         (Tool::Eraser, Icon::Eraser, "Borracha (E ou 0)", "0"),
                         (Tool::Frame, Icon::Frame, "Frame (F)", "F"),
+                        (Tool::Laser, Icon::Laser, "Ponteiro laser (K)", "K"),
                     ];
                     for (tool, icon, tip, key) in tools {
                         let is_image = icon == Icon::Image;
@@ -1762,6 +1783,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Inserir imagem", "9"),
                     ("Borracha", "E ou 0"),
                     ("Frame", "F"),
+                    ("Ponteiro laser", "K"),
                     ("Editar texto", "Enter"),
                     ("Renomear frame", "Enter · duplo clique no nome"),
                     ("Concluir texto", "Esc · Ctrl+Enter"),
@@ -1984,6 +2006,7 @@ fn hint(app: &App, ctx: &egui::Context) {
         }
         (_, Tool::Text) => "Clique para escrever",
         (_, Tool::Eraser) => "Clique ou arraste sobre os elementos para apagar",
+        (_, Tool::Laser) => "Arraste para apontar · o rastro some sozinho",
         (_, Tool::Frame) => {
             "Arraste para criar um frame · o que ficar dentro passa a fazer parte dele"
         }
