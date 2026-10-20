@@ -8,6 +8,8 @@
 	<string>RustDraw</string>
 	<key>CFBundleExecutable</key>
 	<string>rustdraw</string>
+	<key>CFBundleIconFile</key>
+	<string>RustDraw</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.diegofernandes.rustdraw</string>
 	<key>CFBundleInfoDictionaryVersion</key>

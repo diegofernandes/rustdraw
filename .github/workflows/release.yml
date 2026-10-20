@@ -110,6 +110,16 @@ jobs:
                 > "$app/Contents/Info.plist"
               plutil -lint "$app/Contents/Info.plist"
               printf 'APPL????' > "$app/Contents/PkgInfo"
+              # Ícone do Dock e do Finder: o próprio binário desenha o ícone em
+              # cada tamanho (com a margem dos ícones do macOS) e o iconutil
+              # monta o .icns
+              iconset="$RUNNER_TEMP/RustDraw.iconset"
+              mkdir -p "$iconset"
+              for s in 16 32 128 256 512; do
+                "$app/Contents/MacOS/rustdraw" icon "$iconset/icon_${s}x${s}.png" --size "$s" --margin 0.1
+                "$app/Contents/MacOS/rustdraw" icon "$iconset/icon_${s}x${s}@2x.png" --size "$((s * 2))" --margin 0.1
+              done
+              iconutil -c icns "$iconset" -o "$app/Contents/Resources/RustDraw.icns"
               # Assinatura ad-hoc do bundle inteiro (o Apple Silicon exige
               # alguma assinatura e o Info.plist precisa estar selado nela)
               codesign --force --sign - "$app"
