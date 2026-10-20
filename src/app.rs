@@ -277,6 +277,8 @@ pub struct App {
     pub point_sel: Option<(String, BTreeSet<usize>)>,
     /// Estado das setas ligadas já vistas (ver `binding::sync`).
     bind_seen: HashMap<String, Vec<i64>>,
+    /// Assinatura da cena na última sincronização (ver [`App::sync_bindings`]).
+    synced: Option<u64>,
     /// Modificadores do último quadro (Ctrl/Cmd desliga a ligação de setas).
     mods: Modifiers,
     /// Onde o nome de cada frame foi desenhado (tela), para clicar nele.
@@ -372,6 +374,22 @@ const NO_DIALOG: &str =
 
 pub fn autosave_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("rustdraw").join("autosave.excalidraw"))
+}
+
+/// Muda sempre que um elemento muda (todo `touch` troca o `versionNonce`; a
+/// posição e o tamanho entram também, por garantia), entra, sai ou troca de
+/// lugar.
+fn scene_signature(els: &[Element]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    els.len().hash(&mut h);
+    for e in els {
+        (&e.id, e.version, e.version_nonce).hash(&mut h);
+        for v in [e.x, e.y, e.width, e.height, e.angle] {
+            v.to_bits().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// Arquivo do desenho guardado no autosave.
@@ -499,6 +517,7 @@ impl App {
             bind_hint: None,
             point_sel: None,
             bind_seen: HashMap::new(),
+            synced: None,
             mods: Modifiers::NONE,
             frame_labels: vec![],
             renaming: None,
@@ -627,9 +646,16 @@ impl App {
 
     /// Faz os textos dentro das formas e as setas ligadas acompanharem as
     /// formas que mudaram.
+    ///
+    /// Roda em todo quadro, mas só trabalha se algum elemento mudou desde a
+    /// última vez (num diagrama grande, sincronizar custa alguns ms).
     pub fn sync_bindings(&mut self) {
+        if self.synced == Some(scene_signature(&self.elements)) {
+            return;
+        }
         label::sync(&mut self.elements);
         binding::sync(&mut self.elements, &mut self.bind_seen);
+        self.synced = Some(scene_signature(&self.elements));
     }
 
     /// Solta as pontas de setas de `moved` cuja forma ficou para trás
@@ -734,6 +760,7 @@ impl App {
         self.bad_images.clear();
         self.elements = f.elements;
         self.bind_seen.clear();
+        self.synced = None;
         self.bind_hint = None;
         self.selected.clear();
         self.undo.clear();
@@ -1399,6 +1426,7 @@ impl App {
             let ids: HashSet<String> = self.elements.iter().map(|e| e.id.clone()).collect();
             self.selected.retain(|s| ids.contains(s));
             self.bind_seen.clear();
+            self.synced = None;
             self.bind_hint = None;
             self.export_preview = None;
             self.toast(format!("Recarregado: {}", file_name(&path)));
@@ -4908,6 +4936,33 @@ mod tests {
             "a imagem continua no arquivo"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_skips_unchanged_frames_but_follows_moves() {
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        let specs = [
+            serde_json::json!({"type": "rectangle", "id": "a", "label": "A"}),
+            serde_json::json!({"type": "rectangle", "id": "b", "x": 400}),
+            serde_json::json!({"type": "arrow", "id": "s", "start": {"element": "a"}, "end": {"element": "b"}}),
+        ];
+        crate::edit::add(&mut app.elements, &mut Map::new(), &specs).unwrap();
+        app.sync_bindings();
+        let before = app.elements.clone();
+        app.sync_bindings();
+        assert_eq!(app.elements, before, "nada mudou: nada a fazer");
+
+        let a = app.get_mut("a").unwrap();
+        a.y += 300.0;
+        a.touch();
+        app.sync_bindings();
+        let arrow = app.elements.iter().find(|e| e.id == "s").unwrap();
+        assert!(
+            geom::abs_points(arrow)[0].y > 250.0,
+            "a seta acompanhou a forma"
+        );
+        let label = &app.elements[label::label_of(&app.elements, "a").unwrap()];
+        assert!(geom::center(label).y > 300.0, "o rótulo acompanhou a forma");
     }
 
     #[test]

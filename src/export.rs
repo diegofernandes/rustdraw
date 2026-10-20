@@ -778,7 +778,10 @@ mod tests {
         let big = text(8000.0);
         let pm = render_pixmap(&big, &opts(0.3)).unwrap();
         let dark = pm.pixels().iter().filter(|p| p.red() < 128).count();
-        assert!(dark > pm.pixels().len() / 50, "o texto foi desenhado ({dark} px)");
+        assert!(
+            dark > pm.pixels().len() / 50,
+            "o texto foi desenhado ({dark} px)"
+        );
     }
 
     #[test]

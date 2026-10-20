@@ -131,7 +131,13 @@ pub fn sync(els: &mut Vec<Element>) -> bool {
     }
 
     // rótulo logo acima da forma, para não ficar escondido atrás dela
-    let mut i = 0;
+    // (quase sempre já está: só então vale percorrer movendo)
+    let below = els.iter().enumerate().any(|(i, e)| {
+        container_id(e)
+            .and_then(|c| index.get(c))
+            .is_some_and(|&c| c > i && can_contain(&els[c]))
+    });
+    let mut i = if below { 0 } else { els.len() };
     while i < els.len() {
         if let Some(c) = container_of(els, i)
             && c > i
@@ -144,11 +150,14 @@ pub fn sync(els: &mut Vec<Element>) -> bool {
         i += 1;
     }
 
-    let index: HashMap<String, usize> = els
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.id.clone(), i))
-        .collect();
+    let index = if below {
+        els.iter()
+            .enumerate()
+            .map(|(i, e)| (e.id.clone(), i))
+            .collect()
+    } else {
+        index
+    };
     let mut labels: HashMap<String, Vec<String>> = HashMap::new();
     for i in 0..els.len() {
         let Some(&c) = container_id(&els[i]).and_then(|c| index.get(c)) else {
@@ -176,6 +185,30 @@ pub fn sync(els: &mut Vec<Element>) -> bool {
     // `boundElements` da forma lista exatamente os seus rótulos
     for e in els.iter_mut() {
         let mine = labels.get(&e.id);
+        // o caso comum (já em dia) sem copiar a lista
+        let listed = e.bound_elements.as_ref().and_then(|v| v.as_array());
+        let texts = listed
+            .into_iter()
+            .flatten()
+            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("text"));
+        let in_mine = |v: &Value| {
+            v.get("id")
+                .and_then(|i| i.as_str())
+                .is_some_and(|id| mine.is_some_and(|m| m.iter().any(|x| x == id)))
+        };
+        let mut n = 0;
+        let mut ok = true;
+        for v in texts {
+            n += 1;
+            ok &= in_mine(v);
+        }
+        let has_all = mine
+            .into_iter()
+            .flatten()
+            .all(|id| listed.is_some_and(|l| has_text(l, id)));
+        if ok && has_all && n == mine.map_or(0, Vec::len) {
+            continue;
+        }
         let old = bound_list(e);
         let mut new: Vec<Value> = old
             .iter()
