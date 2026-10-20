@@ -4,10 +4,14 @@
 //! qualquer e anota a porta e uma chave aleatória em `mcp-live.json`, na pasta
 //! de dados do RustDraw. O `rustdraw mcp` lê esse arquivo e manda cada chamada
 //! de ferramenta para o editor, que a aplica no desenho aberto (com desfazer).
-//! Só aceita conexões locais que conheçam a chave; nada sai da máquina.
+//! Só aceita conexões locais que conheçam a chave (nova a cada vez que a opção
+//! é ligada); nada sai da máquina. Além disso, o editor pede ao usuário que
+//! aprove cada assistente antes de atender os pedidos dele.
 //!
 //! Cada conexão leva um pedido e uma resposta, uma linha JSON cada:
-//! `{"token", "name", "arguments"}` → `{"result": ...}` ou `{"error": "..."}`.
+//! `{"token", "client", "session", "name", "arguments"}` → `{"result": ...}`
+//! ou `{"error": "..."}`. `client` é o nome do assistente (do `initialize` do
+//! MCP) e `session` identifica um processo `rustdraw mcp`.
 
 use crate::model::new_id;
 use serde_json::{Map, Value, json};
@@ -31,6 +35,10 @@ pub fn discovery_path() -> Option<PathBuf> {
 
 /// Um pedido de ferramenta vindo do `rustdraw mcp`.
 pub struct Request {
+    /// Nome do assistente, como ele se apresentou.
+    pub client: String,
+    /// Um id por processo `rustdraw mcp`.
+    pub session: String,
     pub name: String,
     pub args: Map<String, Value>,
     reply: Sender<Result<Value, String>>,
@@ -45,6 +53,7 @@ impl Request {
 /// Lado do editor: escuta enquanto existir.
 pub struct Host {
     pub rx: Receiver<Request>,
+    pub port: u16,
     stop: Arc<AtomicBool>,
     token: String,
     file: PathBuf,
@@ -87,6 +96,7 @@ impl Host {
         });
         Ok(Host {
             rx,
+            port,
             stop,
             token,
             file: file.to_path_buf(),
@@ -137,7 +147,16 @@ fn serve(s: TcpStream, token: &str, tx: &Sender<Request>, wake: &(dyn Fn() + Sen
         return answer(Err("falta `name`".into()));
     };
     let (reply, wait) = mpsc::channel();
+    let text = |k: &str, default: &str| {
+        let v = msg[k].as_str().unwrap_or("").trim();
+        if v.is_empty() { default } else { v }
+            .chars()
+            .take(80)
+            .collect::<String>()
+    };
     let req = Request {
+        client: text("client", "assistente sem nome"),
+        session: text("session", "?"),
         name: name.to_string(),
         args: msg["arguments"].as_object().cloned().unwrap_or_default(),
         reply,
@@ -152,6 +171,67 @@ fn serve(s: TcpStream, token: &str, tx: &Sender<Request>, wake: &(dyn Fn() + Sen
     );
 }
 
+/// Quantos pedidos o histórico guarda.
+const LOG_LEN: usize = 100;
+
+/// Um processo `rustdraw mcp` que falou com o editor e a decisão do usuário.
+pub struct Session {
+    pub id: String,
+    pub client: String,
+    /// `None` enquanto o usuário não respondeu.
+    pub allowed: Option<bool>,
+}
+
+/// Um pedido atendido (ou recusado), para o painel "Edição por IA".
+pub struct LogEntry {
+    /// Instante do editor (segundos), para mostrar "há 2 min".
+    pub at: f64,
+    pub client: String,
+    pub tool: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// O que o editor sabe das conexões: quem pode editar e o que foi feito.
+#[derive(Default)]
+pub struct Sessions {
+    pub list: Vec<Session>,
+    pub log: std::collections::VecDeque<LogEntry>,
+}
+
+impl Sessions {
+    /// Pode atender `req`? `None` = ainda esperando o usuário (um processo novo
+    /// fica registrado como pendente). Assistentes em `trusted` entram direto.
+    pub fn decide(&mut self, req: &Request, trusted: &[String]) -> Option<bool> {
+        if let Some(s) = self.list.iter().find(|s| s.id == req.session) {
+            return s.allowed;
+        }
+        let allowed = trusted.contains(&req.client).then_some(true);
+        self.list.push(Session {
+            id: req.session.clone(),
+            client: req.client.clone(),
+            allowed,
+        });
+        allowed
+    }
+
+    /// O primeiro processo esperando aprovação.
+    pub fn pending(&self) -> Option<&Session> {
+        self.list.iter().find(|s| s.allowed.is_none())
+    }
+
+    pub fn set(&mut self, id: &str, allowed: bool) {
+        if let Some(s) = self.list.iter_mut().find(|s| s.id == id) {
+            s.allowed = Some(allowed);
+        }
+    }
+
+    pub fn record(&mut self, e: LogEntry) {
+        self.log.push_front(e);
+        self.log.truncate(LOG_LEN);
+    }
+}
+
 /// Lado do `rustdraw mcp`: o editor não está aberto com a opção ligada, ou o
 /// pedido falhou depois de chegar nele.
 #[derive(Debug, PartialEq)]
@@ -160,12 +240,29 @@ pub enum CallError {
     Failed(String),
 }
 
-/// Manda uma chamada de ferramenta para o editor aberto.
-pub fn call(name: &str, args: &Map<String, Value>) -> Result<Value, CallError> {
-    call_at(&discovery_path().ok_or(CallError::NotRunning)?, name, args)
+/// Quem está chamando: o assistente e o processo `rustdraw mcp`.
+#[derive(Clone, Debug)]
+pub struct Client {
+    pub name: String,
+    pub session: String,
 }
 
-fn call_at(file: &Path, name: &str, args: &Map<String, Value>) -> Result<Value, CallError> {
+/// Manda uma chamada de ferramenta para o editor aberto.
+pub fn call(client: &Client, name: &str, args: &Map<String, Value>) -> Result<Value, CallError> {
+    call_at(
+        &discovery_path().ok_or(CallError::NotRunning)?,
+        client,
+        name,
+        args,
+    )
+}
+
+fn call_at(
+    file: &Path,
+    client: &Client,
+    name: &str,
+    args: &Map<String, Value>,
+) -> Result<Value, CallError> {
     let info: Value = std::fs::read_to_string(file)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -181,7 +278,13 @@ fn call_at(file: &Path, name: &str, args: &Map<String, Value>) -> Result<Value, 
     let failed = |e: std::io::Error| CallError::Failed(format!("conexão com o editor: {e}"));
     s.set_read_timeout(Some(REPLY_TIMEOUT + Duration::from_secs(5)))
         .map_err(failed)?;
-    let msg = json!({"token": info["token"], "name": name, "arguments": args});
+    let msg = json!({
+        "token": info["token"],
+        "client": client.name,
+        "session": client.session,
+        "name": name,
+        "arguments": args,
+    });
     writeln!(&s, "{msg}").map_err(failed)?;
     let mut line = String::new();
     BufReader::new(&s).read_line(&mut line).map_err(failed)?;
@@ -207,21 +310,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rustdraw-live-{}", new_id()));
         let file = dir.join("mcp-live.json");
         let args = Map::new();
-        assert_eq!(call_at(&file, "x", &args), Err(CallError::NotRunning));
+        let me = Client {
+            name: "Teste".into(),
+            session: "s1".into(),
+        };
+        assert_eq!(call_at(&file, &me, "x", &args), Err(CallError::NotRunning));
 
         let host = Host::start_at(&file, || {}).unwrap();
         let client = {
-            let file = file.clone();
+            let (file, me) = (file.clone(), me.clone());
             std::thread::spawn(move || {
                 let args = Map::new();
                 (
-                    call_at(&file, "get_scene", &args),
-                    call_at(&file, "add_elements", &args),
+                    call_at(&file, &me, "get_scene", &args),
+                    call_at(&file, &me, "add_elements", &args),
                 )
             })
         };
         let req = host.rx.recv().unwrap();
         assert_eq!(req.name, "get_scene");
+        assert_eq!((req.client.as_str(), req.session.as_str()), ("Teste", "s1"));
         req.respond(Ok(json!({"ok": 1})));
         host.rx.recv().unwrap().respond(Err("não deu".into()));
         let (a, b) = client.join().unwrap();
@@ -235,9 +343,26 @@ mod tests {
         let forged = dir.join("forged.json");
         std::fs::write(&forged, info.to_string()).unwrap();
         assert_eq!(
-            call_at(&forged, "get_scene", &args),
+            call_at(&forged, &me, "get_scene", &args),
             Err(CallError::Failed("chave inválida".into()))
         );
+
+        // aprovação: processo novo espera; assistente de confiança entra direto
+        let (reply, _) = mpsc::channel();
+        let req = |client: &str, session: &str| Request {
+            client: client.into(),
+            session: session.into(),
+            name: "get_scene".into(),
+            args: Map::new(),
+            reply: reply.clone(),
+        };
+        let mut ss = Sessions::default();
+        assert_eq!(ss.decide(&req("A", "1"), &[]), None);
+        assert_eq!(ss.pending().map(|s| s.id.as_str()), Some("1"));
+        ss.set("1", false);
+        assert_eq!(ss.decide(&req("A", "1"), &[]), Some(false));
+        assert_eq!(ss.decide(&req("B", "2"), &["B".into()]), Some(true));
+        assert!(ss.pending().is_none());
 
         drop(host);
         assert!(!file.exists(), "fechar apaga o arquivo de descoberta");

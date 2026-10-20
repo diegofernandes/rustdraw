@@ -87,7 +87,9 @@ No Claude Desktop, em `claude_desktop_config.json`:
 
 Ligue **Permitir edição por IA (MCP)** no menu (☰) do RustDraw. Enquanto ela estiver ligada, as ferramentas chamadas sem `file` agem direto no desenho aberto, mesmo que ele ainda não tenha sido salvo: cada mudança aparece na hora e o Ctrl+Z desfaz o que a IA fez. A opção fica lembrada entre uma sessão e outra.
 
-Por baixo, o editor escuta só em `127.0.0.1`, numa porta qualquer, e anota a porta e uma chave aleatória em `mcp-live.json`, na pasta de dados do RustDraw; o `rustdraw mcp` lê esse arquivo para achar o editor. Ao desligar a opção ou fechar o editor, o arquivo é apagado.
+Na primeira vez que um assistente se conecta, o editor pergunta se ele pode editar o desenho: **Permitir** (até fechar o editor ou desligar a opção), **Sempre permitir** (lembrado pelo nome do assistente) ou **Recusar**. Enquanto você não responde, nada é alterado. O indicador no canto inferior direito mostra o endereço (`127.0.0.1:porta`) e abre o painel **Edição por IA**, com os assistentes conectados (dá para revogar), os sempre permitidos e o histórico de pedidos (hora, assistente, ferramenta e resultado).
+
+Por baixo, o editor escuta só em `127.0.0.1`, numa porta qualquer, e anota a porta e uma chave aleatória (nova a cada vez que a opção é ligada) em `mcp-live.json`, na pasta de dados do RustDraw; o `rustdraw mcp` lê esse arquivo para achar o editor. Ao desligar a opção ou fechar o editor, o arquivo é apagado.
 
 ### Editar um arquivo
 

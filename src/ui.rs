@@ -1140,6 +1140,15 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 {
                     app.set_live(live);
                 }
+                if let Some(h) = &app.live {
+                    let port = h.port;
+                    if ui
+                        .small_button(format!("Ver conexões  (127.0.0.1:{port})"))
+                        .clicked()
+                    {
+                        app.show_live = true;
+                    }
+                }
                 section(ui, "Fundo do canvas");
                 ui.horizontal(|ui| {
                     for c in CANVAS_BGS {
@@ -2030,6 +2039,9 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
     export_window(app, ctx);
     help_window(app, ctx);
     confirm_window(app, ctx);
+    live_chip(app, ctx);
+    live_window(app, ctx);
+    live_approval(app, ctx);
     context_menu(app, ctx);
     toast(app, ctx);
 }
@@ -2066,6 +2078,218 @@ fn mode_exit_button(app: &mut App, ctx: &egui::Context) {
                     }
                 });
         });
+}
+
+/// "há 12 s", "há 3 min"...
+fn ago(now: f64, at: f64) -> String {
+    let s = (now - at).max(0.0) as u64;
+    match s {
+        0..5 => "agora".into(),
+        5..60 => format!("há {s} s"),
+        60..3600 => format!("há {} min", s / 60),
+        _ => format!("há {} h", s / 3600),
+    }
+}
+
+/// Indicador de "Edição por IA" ligada, no canto inferior direito; abre o painel.
+fn live_chip(app: &mut App, ctx: &egui::Context) {
+    let Some(h) = &app.live else { return };
+    let port = h.port;
+    let waiting = app.live_sessions.pending().is_some();
+    egui::Area::new(Id::unique("live_chip"))
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-60.0, -12.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            panel_frame(ui)
+                .inner_margin(Margin::same(3))
+                .show(ui, |ui| {
+                    let dot = if waiting {
+                        Color32::from_rgb(240, 140, 0)
+                    } else {
+                        Color32::from_rgb(47, 158, 68)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        let (r, _) = ui.allocate_exact_size(vec2(8.0, 30.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 4.0, dot);
+                        let text = RichText::new(format!("IA  127.0.0.1:{port}"));
+                        if ui
+                            .add(
+                                egui::Button::new(text)
+                                    .frame(false)
+                                    .min_size(vec2(0.0, 30.0)),
+                            )
+                            .on_hover_text(if waiting {
+                                "Um assistente está esperando sua permissão"
+                            } else {
+                                "Edição por IA ligada: ver conexões e pedidos"
+                            })
+                            .clicked()
+                        {
+                            app.show_live = !app.show_live;
+                        }
+                    });
+                });
+        });
+}
+
+/// Pergunta se um assistente novo pode editar o desenho.
+fn live_approval(app: &mut App, ctx: &egui::Context) {
+    let Some(s) = app.live_sessions.pending() else {
+        return;
+    };
+    let (id, client) = (s.id.clone(), s.client.clone());
+    let waiting = app.live_queue_len();
+    egui::Window::new("Permitir edição por IA?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "{client} quer ler e editar o desenho aberto (pelo rustdraw mcp)."
+            ));
+            ui.label(
+                RichText::new(format!(
+                    "{} esperando. Tudo o que ele fizer pode ser desfeito com {}.",
+                    if waiting == 1 {
+                        "1 pedido".to_string()
+                    } else {
+                        format!("{waiting} pedidos")
+                    },
+                    keys("Ctrl+Z")
+                ))
+                .weak(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Permitir").clicked() {
+                    app.live_answer(&id, true, false);
+                }
+                if ui.button(format!("Sempre permitir {client}")).clicked() {
+                    app.live_answer(&id, true, true);
+                }
+                if ui.button("Recusar").clicked() {
+                    app.live_answer(&id, false, false);
+                }
+            });
+        });
+}
+
+/// Painel "Edição por IA": endereço, assistentes e histórico de pedidos.
+fn live_window(app: &mut App, ctx: &egui::Context) {
+    if !app.show_live {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Edição por IA")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(420.0)
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -56.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            match &app.live {
+                Some(h) => {
+                    ui.label(format!(
+                        "Escutando em 127.0.0.1:{} (só este computador)",
+                        h.port
+                    ));
+                    ui.label(
+                        RichText::new(
+                            "O rustdraw mcp acha o editor pelo arquivo mcp-live.json, que \
+                             guarda a porta e uma chave nova a cada vez que a opção é ligada.",
+                        )
+                        .weak(),
+                    );
+                    if ui.button("Desligar a edição por IA").clicked() {
+                        app.set_live(false);
+                    }
+                }
+                None => {
+                    ui.label("Edição por IA desligada.");
+                    if ui.button("Ligar").clicked() {
+                        app.set_live(true);
+                    }
+                }
+            }
+            section(ui, "Assistentes nesta sessão");
+            if app.live_sessions.list.is_empty() {
+                ui.label(RichText::new("Nenhum ainda.").weak());
+            }
+            let mut answer = None;
+            egui::Grid::new("live_sessions")
+                .num_columns(3)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for s in &app.live_sessions.list {
+                        ui.label(&s.client);
+                        ui.label(match s.allowed {
+                            Some(true) => "permitido",
+                            Some(false) => "recusado",
+                            None => "esperando",
+                        });
+                        let (label, allow) = if s.allowed == Some(true) {
+                            ("Revogar", false)
+                        } else {
+                            ("Permitir", true)
+                        };
+                        if ui.small_button(label).clicked() {
+                            answer = Some((s.id.clone(), allow));
+                        }
+                        ui.end_row();
+                    }
+                });
+            if let Some((id, allow)) = answer {
+                app.live_answer(&id, allow, false);
+            }
+            if !app.live_trusted.is_empty() {
+                section(ui, "Sempre permitidos");
+                let mut remove = None;
+                for c in &app.live_trusted {
+                    ui.horizontal(|ui| {
+                        ui.label(c);
+                        if ui.small_button("Remover").clicked() {
+                            remove = Some(c.clone());
+                        }
+                    });
+                }
+                if let Some(c) = remove {
+                    app.live_untrust(&c);
+                }
+            }
+            section(ui, "Pedidos");
+            if app.live_sessions.log.is_empty() {
+                ui.label(RichText::new("Nenhum pedido ainda.").weak());
+            }
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("live_log")
+                        .num_columns(4)
+                        .spacing([10.0, 3.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for e in &app.live_sessions.log {
+                                ui.label(RichText::new(ago(app.now, e.at)).weak());
+                                ui.label(&e.client);
+                                ui.label(RichText::new(&e.tool).monospace());
+                                let color = if e.ok {
+                                    ui.visuals().text_color()
+                                } else {
+                                    Color32::from_rgb(224, 49, 49)
+                                };
+                                ui.label(RichText::new(&e.detail).color(color));
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    if !open {
+        app.show_live = false;
+    }
+    if !app.live_sessions.log.is_empty() {
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
+    }
 }
 
 /// Painel de estatísticas (Alt+/).
