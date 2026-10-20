@@ -125,7 +125,7 @@ impl Server {
         let result = match method {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tools()})),
+            "tools/list" => Ok(json!({"tools": self.tools()})),
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({"resources": []})),
             "prompts/list" => Ok(json!({"prompts": []})),
@@ -135,6 +135,23 @@ impl Server {
             Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
             Err((code, m)) => rpc_error(id, code, m),
         })
+    }
+
+    /// As ferramentas. No editor elas só agem no desenho aberto, então o
+    /// parâmetro `file` sai da lista.
+    fn tools(&self) -> Value {
+        let mut list = tools();
+        if self.editor.is_some()
+            && let Some(tools) = list.as_array_mut()
+        {
+            for t in tools {
+                if let Some(props) = t["inputSchema"]["properties"].as_object_mut() {
+                    props.remove("file");
+                    props.remove("overwrite");
+                }
+            }
+        }
+        list
     }
 
     fn initialize(&mut self, params: &Value) -> Value {
@@ -175,6 +192,11 @@ impl Server {
             .get("arguments")
             .and_then(|a| a.as_object())
             .unwrap_or(&empty);
+        // dentro do editor, mexer em arquivos passaria por fora da aprovação
+        // do usuário: só o desenho aberto (que pede aprovação) é atendido
+        if self.editor.is_some() && self.target(args).is_some() {
+            return Ok(text_result(json!(FILE_IN_EDITOR), true));
+        }
         Ok(match self.target(args) {
             Some(path) => self.call_file(name, args, &path),
             None => match match &self.editor {
@@ -213,6 +235,11 @@ impl Server {
         out.unwrap_or_else(|e| text_result(json!(e), true))
     }
 }
+
+/// `file` mandado ao endereço MCP do editor.
+const FILE_IN_EDITOR: &str = "O endereço MCP do RustDraw edita só o desenho aberto no editor \
+(com a aprovação do usuário): tire o parâmetro `file`. Para editar um arquivo .excalidraw \
+direto, use o servidor `rustdraw mcp`.";
 
 /// Sem arquivo e sem editor aberto com a opção ligada.
 const NO_TARGET: &str = "Nenhum desenho para editar: informe `file` (caminho do .excalidraw) \

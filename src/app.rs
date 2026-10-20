@@ -1494,7 +1494,8 @@ impl App {
                 serde_json::json!(self.live_trusted),
             );
         }
-        let _ = crate::edit::write_atomic(&path, f.to_json().as_bytes());
+        // o autosave guarda a chave do endereço MCP
+        let _ = crate::edit::write_private(&path, f.to_json().as_bytes());
         self.autosave_pending = false;
     }
 
