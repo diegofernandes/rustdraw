@@ -222,6 +222,9 @@ pub struct App {
     pub live_sessions: live::Sessions,
     /// Assistentes que o usuário mandou "Sempre permitir" (guardado no autosave).
     pub live_trusted: Vec<String>,
+    /// Chave que os assistentes mandam ao endereço MCP do editor; guardada
+    /// para a configuração deles continuar valendo.
+    pub live_token: String,
     /// Painel "Edição por IA".
     pub show_live: bool,
     pub dark: bool,
@@ -420,6 +423,7 @@ impl App {
             live_queue: vec![],
             live_sessions: live::Sessions::default(),
             live_trusted: vec![],
+            live_token: live::new_token(),
             show_live: false,
             dark: false,
             grid: false,
@@ -514,6 +518,11 @@ impl App {
                 .get("rustdrawMcpTrusted")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
+            if let Some(t) = f.app_state.get("rustdrawMcpToken").and_then(|v| v.as_str())
+                && !t.is_empty()
+            {
+                app.live_token = t.to_string();
+            }
             if f.app_state.get("rustdrawMcpLive").and_then(|v| v.as_bool()) == Some(true) {
                 app.set_live(true);
                 app.toast = None;
@@ -1123,11 +1132,13 @@ impl App {
         }
         if on {
             let ctx = self.ctx.clone();
-            match live::Host::start(move || ctx.request_repaint()) {
+            match live::Host::start(live::DEFAULT_PORT, &self.live_token, move || {
+                ctx.request_repaint()
+            }) {
                 Ok(h) => {
+                    self.toast(format!("Edição por IA ligada em {}", live::mcp_url(h.port)));
                     self.live = Some(h);
                     self.live_sessions = live::Sessions::default();
-                    self.toast("Edição por IA ligada: o rustdraw mcp agora edita este desenho");
                 }
                 Err(e) => self.toast(format!("Não foi possível ligar a edição por IA: {e}")),
             }
@@ -1138,6 +1149,25 @@ impl App {
             }
             self.toast("Edição por IA desligada");
         }
+        self.autosave_pending = true;
+        self.last_change = self.now;
+    }
+
+    /// Grava as preferências logo (por exemplo, a chave que acabou de ser copiada).
+    pub fn keep_settings(&mut self) {
+        self.autosave_pending = true;
+        self.last_change = self.now;
+    }
+
+    /// Troca a chave do endereço MCP; os assistentes configurados com a antiga
+    /// param de conseguir editar.
+    pub fn live_new_token(&mut self) {
+        self.live_token = live::new_token();
+        if self.live.is_some() {
+            self.set_live(false);
+            self.set_live(true);
+        }
+        self.toast("Chave nova gerada: atualize a configuração do assistente");
         self.autosave_pending = true;
         self.last_change = self.now;
     }
@@ -1377,6 +1407,7 @@ impl App {
             );
             obj.insert("objectsSnapModeEnabled".into(), self.snap.into());
             obj.insert("rustdrawMcpLive".into(), self.live.is_some().into());
+            obj.insert("rustdrawMcpToken".into(), self.live_token.clone().into());
             obj.insert(
                 "rustdrawMcpTrusted".into(),
                 serde_json::json!(self.live_trusted),

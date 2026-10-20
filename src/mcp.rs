@@ -1,10 +1,11 @@
-//! Servidor MCP (Model Context Protocol) local, por stdio.
+//! Servidor MCP (Model Context Protocol) local.
 //!
 //! `rustdraw mcp [arquivo.excalidraw]` deixa um assistente de IA (Claude
-//! Desktop, Claude Code, ...) ler, editar e exportar desenhos. Não abre porta
-//! nenhuma: o cliente inicia o processo e conversa pelo stdin/stdout, uma
-//! mensagem JSON-RPC por linha. Cada ferramenta lê o arquivo, aplica a mudança
-//! e grava de novo.
+//! Desktop, Claude Code, ...) ler, editar e exportar desenhos: o cliente inicia
+//! o processo e conversa pelo stdin/stdout, uma mensagem JSON-RPC por linha.
+//! Com `file`, cada ferramenta lê o arquivo, aplica a mudança e grava de novo;
+//! sem ele, a chamada vai para o editor aberto (veja `live`). O editor também
+//! atende MCP por HTTP com este mesmo `Server` (`Server::for_editor`).
 
 use crate::edit;
 use crate::export::{self, ExportOpts};
@@ -28,10 +29,13 @@ mudar, e preview para conferir o resultado como imagem. Imagens entram com add_e
 Sem `file`, as ferramentas agem no desenho aberto no editor RustDraw (se ele permitir), e o usuário \
 vê cada mudança na hora.";
 
+#[derive(Clone)]
 pub struct Server {
     default_file: Option<PathBuf>,
     /// Como este processo se apresenta ao editor aberto.
     client: live::Client,
+    /// Dentro do editor (MCP por HTTP): chamadas sem `file` vão direto para ele.
+    editor: Option<live::Editor>,
 }
 
 impl Server {
@@ -42,6 +46,16 @@ impl Server {
                 name: "assistente sem nome".into(),
                 session: crate::model::new_id(),
             },
+            editor: None,
+        }
+    }
+
+    /// Servidor de uma sessão MCP por HTTP, dentro do editor.
+    pub fn for_editor(editor: live::Editor, client: live::Client) -> Self {
+        Self {
+            default_file: None,
+            client,
+            editor: Some(editor),
         }
     }
 }
@@ -163,7 +177,10 @@ impl Server {
             .unwrap_or(&empty);
         Ok(match self.target(args) {
             Some(path) => self.call_file(name, args, &path),
-            None => match live::call(&self.client, name, args) {
+            None => match match &self.editor {
+                Some(e) => e.call(&self.client, name, args),
+                None => live::call(&self.client, name, args),
+            } {
                 Ok(r) => r,
                 Err(live::CallError::Failed(e)) => text_result(json!(e), true),
                 Err(live::CallError::NotRunning) => text_result(json!(NO_TARGET), true),
