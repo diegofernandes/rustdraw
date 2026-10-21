@@ -11,14 +11,17 @@ use crate::elbow;
 use crate::files;
 use crate::fonts::{self, Family};
 use crate::geom;
+use crate::label;
 use crate::model::{Element, SceneFile, Style, new_id};
+use crate::note;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const KINDS: [&str; 8] = [
+const KINDS: [&str; 9] = [
     "rectangle",
+    "note",
     "diamond",
     "ellipse",
     "text",
@@ -205,7 +208,8 @@ fn end_summary(el: &Element, end: bool) -> Value {
 pub fn summary(el: &Element, all: &[Element]) -> Value {
     let mut o = Map::new();
     o.insert("id".into(), json!(el.id));
-    o.insert("type".into(), json!(el.kind));
+    let kind = if note::is_note(el) { "note" } else { &el.kind };
+    o.insert("type".into(), json!(kind));
     for (k, v) in [
         ("x", el.x),
         ("y", el.y),
@@ -263,7 +267,9 @@ pub fn summary(el: &Element, all: &[Element]) -> Value {
         }
         _ => {
             if let Some(l) = label_of(all, &el.id) {
-                o.insert("label".into(), json!(l.text()));
+                // o que foi escrito, sem as quebras automáticas
+                let text = l.str_field("originalText").unwrap_or(l.text());
+                o.insert("label".into(), json!(text));
             }
         }
     }
@@ -543,6 +549,9 @@ fn set_label(
             t.set_field("textAlign", json!("center"));
             t.set_field("verticalAlign", json!("middle"));
             t.set_field("containerId", json!(container));
+            if note::is_note(shape) {
+                note::style_text(&mut t);
+            }
             // agrupado com a forma, para que no editor os dois andem juntos
             let group = new_id();
             t.group_ids = std::iter::once(group.clone())
@@ -576,22 +585,14 @@ fn set_label(
     Ok(())
 }
 
-/// Recoloca o rótulo de `container` no centro dela.
+/// Quebra o rótulo de `container` na largura dela e o põe no lugar
+/// (no centro, ou em cima à esquerda numa nota).
 fn center_label(els: &mut [Element], container: &str) {
-    let Some(c) = els.iter().find(|e| e.id == container) else {
-        return;
-    };
-    let (center, angle) = (geom::center(c), c.angle);
-    if let Some(t) = els
-        .iter_mut()
-        .find(|e| e.kind == "text" && e.str_field("containerId") == Some(container))
-    {
-        measure(t);
-        t.x = center.x as f64 - t.width / 2.0;
-        t.y = center.y as f64 - t.height / 2.0;
-        t.angle = angle;
-        t.touch();
-    }
+    let f = fonts::raster_fonts();
+    label::refit(els, container, |t, line| {
+        let fam = Family::from_excalidraw(t.font_family());
+        f.line_width(fam, line, t.font_size() as f32) as f64
+    });
 }
 
 /// Depois de mudanças: arruma as ligações, recentraliza rótulos e faz as
@@ -660,6 +661,9 @@ pub fn add(
         let kind = one_of(s, "type", &KINDS)
             .map_err(ctx)?
             .ok_or_else(|| ctx(format!("falta `type` ({})", KINDS.join(", "))))?;
+        // a nota é um retângulo com o visual de nota
+        let is_note = kind == "note";
+        let kind = if is_note { "rectangle" } else { kind };
         let mut el = Element::new(kind, 0.0, 0.0, &Style::default());
         if let Some(id) = string(s, "id").map_err(ctx)? {
             if id.is_empty() || els.iter().any(|e| e.id == id) {
@@ -667,7 +671,11 @@ pub fn add(
             }
             el.id = id.into();
         }
-        if matches!(kind, "rectangle" | "diamond" | "ellipse") {
+        if is_note {
+            note::make(&mut el);
+            el.width = note::SIZE;
+            el.height = note::SIZE;
+        } else if matches!(kind, "rectangle" | "diamond" | "ellipse") {
             el.width = 160.0;
             el.height = 80.0;
         }
@@ -709,7 +717,7 @@ pub fn add(
         if let Some(label) = string(s, "label").map_err(ctx)? {
             if !matches!(kind, "rectangle" | "diamond" | "ellipse") {
                 return Err(ctx(
-                    "`label` só vale para retângulo, losango e elipse".into()
+                    "`label` só vale para retângulo, losango, elipse e nota".into(),
                 ));
             }
             set_label(els, &id, Some(label), s).map_err(ctx)?;
@@ -734,9 +742,12 @@ pub fn update(els: &mut Vec<Element>, specs: &[Value]) -> Result<Vec<String>, St
             .iter()
             .position(|e| e.id == id)
             .ok_or_else(|| ctx(format!("elemento {id:?} não existe")))?;
-        if s.get("type")
-            .is_some_and(|t| t.as_str() != Some(&els[idx].kind))
-        {
+        let kind = if note::is_note(&els[idx]) {
+            "note"
+        } else {
+            &els[idx].kind
+        };
+        if s.get("type").is_some_and(|t| t.as_str() != Some(kind)) {
             return Err(ctx("não dá para mudar o `type` de um elemento".into()));
         }
         let mut el = els[idx].clone();
@@ -756,7 +767,7 @@ pub fn update(els: &mut Vec<Element>, specs: &[Value]) -> Result<Vec<String>, St
         if s.contains_key("label") {
             if !matches!(els[idx].kind.as_str(), "rectangle" | "diamond" | "ellipse") {
                 return Err(ctx(
-                    "`label` só vale para retângulo, losango e elipse".into()
+                    "`label` só vale para retângulo, losango, elipse e nota".into(),
                 ));
             }
             let label = string(s, "label").map_err(ctx)?.map(String::from);
@@ -820,6 +831,44 @@ mod tests {
         )
         .unwrap();
         els
+    }
+
+    #[test]
+    fn notes_are_created_wrapped_and_reported_as_notes() {
+        let mut els = Vec::new();
+        let long = "Lembrar de revisar o PR das notas antes de sexta-feira, \
+                    com bastante texto para a nota precisar crescer para baixo \
+                    porque não cabe tudo em duzentos pixels de altura nenhuma";
+        add(
+            &mut els,
+            &mut Map::new(),
+            &[json!({"type": "note", "id": "n", "x": 10, "y": 20, "label": long})],
+        )
+        .unwrap();
+        let n = &els[0];
+        assert!(note::is_note(n));
+        assert_eq!((n.x, n.y, n.width), (10.0, 20.0, 200.0));
+        assert!(n.height > 200.0, "cresceu para caber o texto");
+        let t = &els[1];
+        assert_eq!(t.text_align(), "left");
+        assert_eq!(t.str_field("verticalAlign"), Some("top"));
+        assert_eq!(t.stroke_color, "#1e1e1e");
+        assert!(t.text().contains('\n'), "quebrado na largura");
+        assert_eq!(t.str_field("originalText"), Some(long));
+        assert!(t.width <= 200.0 - 32.0);
+        // em cima à esquerda, com a folga da nota
+        assert_eq!((t.x, t.y), (26.0, 34.0));
+
+        let sum = summary(&els[0], &els);
+        assert_eq!(sum["type"], "note");
+        assert_eq!(sum["label"], long);
+        update(
+            &mut els,
+            &[json!({"id": "n", "type": "note", "label": "curta"})],
+        )
+        .unwrap();
+        assert_eq!(els[1].text(), "curta");
+        assert!(update(&mut els, &[json!({"id": "n", "type": "rectangle"})]).is_err());
     }
 
     #[test]

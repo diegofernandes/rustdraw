@@ -139,34 +139,102 @@ pub fn fit(
         .collect();
     let mut changed = false;
     for i in 0..els.len() {
-        let Some(&c) = container_id(&els[i]).and_then(|c| index.get(c)) else {
-            continue;
-        };
-        let max = max_width(&els[c]);
-        let t = &els[i];
-        let source = t.str_field("originalText").unwrap_or(t.text());
-        let text = wrap(t, source, max);
-        let lines = text.split('\n').count() as f64;
-        let w = text.split('\n').map(|l| width(t, l)).fold(1.0, f64::max);
-        let h = lines * t.font_size() * t.line_height();
-        let t = &mut els[i];
-        let far = |a: f64, b: f64| (a - b).abs() > 0.01;
-        if t.text() != text || far(t.width, w) || far(t.height, h) {
-            t.set_field("text", json!(text));
-            t.width = w;
-            t.height = h;
-            t.touch();
-            changed = true;
-        }
-        let c = &mut els[c];
-        let need = needed_height(c, h);
-        if c.height >= 0.0 && c.height < need - 0.01 {
-            c.height = need;
-            c.touch();
-            changed = true;
+        if let Some(&c) = container_id(&els[i]).and_then(|c| index.get(c)) {
+            changed |= fit_one(els, i, c, &wrap, &width);
         }
     }
     changed
+}
+
+/// [`fit`] só do rótulo `i`, que está na forma `c`.
+fn fit_one(
+    els: &mut [Element],
+    i: usize,
+    c: usize,
+    wrap: &impl Fn(&Element, &str, f64) -> String,
+    width: &impl Fn(&Element, &str) -> f64,
+) -> bool {
+    let mut changed = false;
+    let max = max_width(&els[c]);
+    let t = &els[i];
+    let source = t.str_field("originalText").unwrap_or(t.text());
+    let text = wrap(t, source, max);
+    let lines = text.split('\n').count() as f64;
+    let w = text.split('\n').map(|l| width(t, l)).fold(1.0, f64::max);
+    let h = lines * t.font_size() * t.line_height();
+    let t = &mut els[i];
+    let far = |a: f64, b: f64| (a - b).abs() > 0.01;
+    if t.text() != text || far(t.width, w) || far(t.height, h) {
+        t.set_field("text", json!(text));
+        t.width = w;
+        t.height = h;
+        t.touch();
+        changed = true;
+    }
+    let c = &mut els[c];
+    let need = needed_height(c, h);
+    if c.height >= 0.0 && c.height < need - 0.01 {
+        c.height = need;
+        c.touch();
+        changed = true;
+    }
+    changed
+}
+
+/// Quebra e põe no lugar o rótulo da forma `container` (sem o editor: quem
+/// mede é `width`). Usado ao editar o arquivo por comandos.
+pub fn refit(els: &mut [Element], container: &str, width: impl Fn(&Element, &str) -> f64) {
+    let Some(c) = els.iter().position(|e| e.id == container && can_contain(e)) else {
+        return;
+    };
+    let Some(i) = els.iter().position(|e| container_id(e) == Some(container)) else {
+        return;
+    };
+    let wrap = |t: &Element, s: &str, max: f64| wrap(s, max, |l| width(t, l));
+    fit_one(els, i, c, &wrap, &width);
+    let (x, y, angle) = placement(&els[i], &els[c]);
+    let t = &mut els[i];
+    (t.x, t.y, t.angle) = (x, y, angle);
+    t.touch();
+}
+
+/// Quebra `text` em linhas de no máximo `max` de largura, palavra a palavra;
+/// uma palavra maior que a linha é cortada entre letras.
+pub fn wrap(text: &str, max: f64, width: impl Fn(&str) -> f64) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        if width(para) <= max {
+            out.push(para.to_string());
+            continue;
+        }
+        let mut line = String::new();
+        for word in para.split(' ') {
+            let joined = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if width(&joined) <= max {
+                line = joined;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            // a palavra sozinha não cabe: corta onde der (pelo menos uma letra)
+            for ch in word.chars() {
+                let mut next = line.clone();
+                next.push(ch);
+                if !line.is_empty() && width(&next) > max {
+                    out.push(std::mem::replace(&mut line, ch.to_string()));
+                } else {
+                    line = next;
+                }
+            }
+        }
+        out.push(line);
+    }
+    out.join("\n")
 }
 
 /// Onde o rótulo `t` deve ficar dentro de `c` (x, y do canto e ângulo).
@@ -387,45 +455,6 @@ mod tests {
     /// Cada letra mede 10.
     fn w10(s: &str) -> f64 {
         s.chars().count() as f64 * 10.0
-    }
-
-    /// Quebra `text` em linhas de no máximo `max` de largura, palavra a palavra;
-    /// uma palavra maior que a linha é cortada entre letras.
-    fn wrap(text: &str, max: f64, width: impl Fn(&str) -> f64) -> String {
-        let mut out: Vec<String> = Vec::new();
-        for para in text.split('\n') {
-            if width(para) <= max {
-                out.push(para.to_string());
-                continue;
-            }
-            let mut line = String::new();
-            for word in para.split(' ') {
-                let joined = if line.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{line} {word}")
-                };
-                if width(&joined) <= max {
-                    line = joined;
-                    continue;
-                }
-                if !line.is_empty() {
-                    out.push(std::mem::take(&mut line));
-                }
-                // a palavra sozinha não cabe: corta onde der (pelo menos uma letra)
-                for ch in word.chars() {
-                    let mut next = line.clone();
-                    next.push(ch);
-                    if !line.is_empty() && width(&next) > max {
-                        out.push(std::mem::replace(&mut line, ch.to_string()));
-                    } else {
-                        line = next;
-                    }
-                }
-            }
-            out.push(line);
-        }
-        out.join("\n")
     }
 
     fn fit10(els: &mut [Element]) -> bool {

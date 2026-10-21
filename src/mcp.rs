@@ -428,15 +428,16 @@ fn element_schema(creating: bool) -> Value {
         } else {
             "Id do elemento a alterar."
         }},
-        "type": {"type": "string", "enum": ["rectangle", "diamond", "ellipse", "text", "line", "arrow", "freedraw", "image"]},
+        "type": {"type": "string", "enum": ["rectangle", "note", "diamond", "ellipse", "text", "line", "arrow", "freedraw", "image"],
+                 "description": "note = nota adesiva: papel amarelo sem borda, com sombra e a ponta dobrada, 200×200 por padrão; o texto vai em `label` e fica em cima à esquerda, quebrando na largura da nota. No arquivo é um retângulo comum."},
         "path": {"type": "string", "description": "Imagem: caminho de um PNG, JPG, GIF ou WebP no disco; é embutido no arquivo. Sem width/height usa o tamanho da imagem (até 1440 px); com um só deles mantém a proporção."},
         "fileId": {"type": "string", "description": "Imagem: reaproveita uma imagem que já está na cena (em vez de `path`)."},
         "x": {"type": "number", "description": "Canto superior esquerdo (texto: ponto de ancoragem conforme textAlign; linhas: origem de `points`)."},
         "y": {"type": "number"},
-        "width": {"type": "number", "description": "Formas. Padrão 160."},
-        "height": {"type": "number", "description": "Formas. Padrão 80."},
+        "width": {"type": "number", "description": "Formas. Padrão 160 (nota: 200)."},
+        "height": {"type": "number", "description": "Formas. Padrão 80 (nota: 200)."},
         "angle": {"type": "number", "description": "Rotação em graus."},
-        "label": {"type": ["string", "null"], "description": "Texto centralizado dentro de retângulo, losango ou elipse. null ou \"\" remove."},
+        "label": {"type": ["string", "null"], "description": "Texto dentro de retângulo, losango, elipse (centralizado) ou nota (em cima à esquerda); quebra na largura da forma, que cresce se ele não couber. null ou \"\" remove."},
         "text": {"type": "string", "description": "Conteúdo de um elemento `text` (\\n quebra linha)."},
         "fontSize": {"type": "number", "description": "Padrão 20."},
         "fontFamily": {"description": "hand (1, padrão), normal (2) ou code (3).", "oneOf": [{"type": "string", "enum": ["hand", "normal", "code"]}, {"type": "integer"}]},
@@ -496,7 +497,7 @@ fn tools() -> Value {
         },
         {
             "name": "add_elements",
-            "description": "Adiciona elementos, na ordem dada e por cima dos existentes. Devolve os ids criados. Exemplo: [{\"type\":\"rectangle\",\"id\":\"api\",\"x\":0,\"y\":0,\"label\":\"API\"},{\"type\":\"ellipse\",\"id\":\"db\",\"x\":300,\"y\":0,\"label\":\"Banco\"},{\"type\":\"arrow\",\"start\":{\"element\":\"api\"},\"end\":{\"element\":\"db\"}}].",
+            "description": "Adiciona elementos, na ordem dada e por cima dos existentes. Devolve os ids criados. Exemplo: [{\"type\":\"rectangle\",\"id\":\"api\",\"x\":0,\"y\":0,\"label\":\"API\"},{\"type\":\"ellipse\",\"id\":\"db\",\"x\":300,\"y\":0,\"label\":\"Banco\"},{\"type\":\"arrow\",\"start\":{\"element\":\"api\"},\"end\":{\"element\":\"db\"}}]. Nota adesiva: {\"type\":\"note\",\"x\":0,\"y\":200,\"label\":\"Lembrar de...\"}.",
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
                 "elements": {"type": "array", "items": element_schema(true)}

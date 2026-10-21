@@ -102,7 +102,7 @@ Para editar arquivos sem o editor aberto, use o `rustdraw mcp` também no Claude
 |---|---|
 | `new_scene` | Cria um desenho vazio |
 | `get_scene` | Lista os elementos (id, tipo, posição, tamanho, texto, estilo, ligações) |
-| `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`) e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
+| `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`), `{"type": "note", "label": "..."}` cria uma nota adesiva e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
 | `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
 | `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
 | `export_image` | Grava PNG ou SVG (do desenho todo ou de um frame, em `frame`) |
