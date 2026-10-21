@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RustDraw
+GenericName=Editor de diagramas
+Comment=Editor de diagramas no estilo Excalidraw, 100% offline
+Exec=rustdraw %f
+Icon=rustdraw
+Terminal=false
+Categories=Graphics;VectorGraphics;
+MimeType=application/vnd.excalidraw+json;application/vnd.excalidrawlib+json;
+Keywords=diagrama;desenho;quadro;excalidraw;
+StartupWMClass=rustdraw

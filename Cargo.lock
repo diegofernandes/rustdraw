@@ -2055,6 +2055,8 @@ dependencies = [
  "epaint_default_fonts",
  "fontdue",
  "image",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "pollster",
  "rfd",
  "serde",

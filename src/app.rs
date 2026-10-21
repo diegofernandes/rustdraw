@@ -4555,6 +4555,11 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+        // desenhos abertos pelo Finder; com vários de uma vez fica o último
+        #[cfg(target_os = "macos")]
+        if let Some(p) = crate::macos::take_opened().pop() {
+            self.open_path(&p);
+        }
         // arquivos arrastados para a janela
         // (imagens entram no desenho onde foram soltas; o resto é aberto)
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());

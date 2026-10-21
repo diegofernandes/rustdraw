@@ -28,6 +28,10 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 
 Binários prontos para **Linux** (x86_64), **Windows** (x86_64) e **macOS** (universal: Apple Silicon e Intel) ficam na página de [Releases](https://github.com/diegofernandes/rustdraw/releases). Basta extrair e rodar `rustdraw` (`rustdraw.exe` no Windows). No macOS o pacote traz o `RustDraw.app`: arraste para a pasta Aplicativos e abra normalmente. Para usar a linha de comando (`export`, `mcp`), o executável fica em `RustDraw.app/Contents/MacOS/rustdraw`.
 
+- **macOS**: depois de copiar o `RustDraw.app` para Aplicativos, arquivos `.excalidraw` e `.excalidrawlib` abrem no RustDraw com duplo clique (ou "Abrir com" e soltando no ícone do Dock).
+- **Linux**: dentro da pasta extraída, rode `./install.sh` para instalar só para o seu usuário, sem sudo: o executável vai para `~/.local/bin`, o RustDraw aparece no menu de aplicativos com ícone e os arquivos `.excalidraw` e `.excalidrawlib` passam a abrir nele com duplo clique. `./install.sh --uninstall` desfaz tudo.
+- **Windows**: os comandos `export`, `icon`, `mcp` e `--help` mostram a saída e os erros no cmd ou no PowerShell de onde foram chamados.
+
 > No macOS o app não é assinado pela Apple: na primeira vez, clique com o botão direito → Abrir (no macOS 15 ou mais novo, abra uma vez e libere em Ajustes do Sistema → Privacidade e Segurança → Abrir Mesmo Assim), ou rode `xattr -dr com.apple.quarantine /Applications/RustDraw.app`.
 
 Para publicar uma nova versão, basta criar a tag (`git tag v0.2.0 && git push origin v0.2.0`, ou pela tela de Releases do GitHub). O workflow `Release` usa a versão da tag no build, compila as três plataformas e publica a release com os pacotes e o `SHA256SUMS.txt`. Não é preciso editar o `Cargo.toml` antes; ele pode ser atualizado depois, quando for conveniente.

@@ -22,6 +22,8 @@ mod label;
 mod laser;
 mod library;
 mod live;
+#[cfg(target_os = "macos")]
+mod macos;
 mod mcp;
 mod model;
 mod render;
@@ -146,8 +148,39 @@ fn cli_icon(args: &[String]) -> Result<(), String> {
     std::fs::write(&out, icons::app_icon_png(size, margin)?).map_err(|e| format!("{out}: {e}"))
 }
 
+/// No Windows o executável é um app gráfico (abre sem janela de console), e o
+/// que os subcomandos escrevem sumiria. Com isto a saída aparece no console de
+/// onde ele foi chamado (cmd, PowerShell). Uma saída já redirecionada, como o
+/// pipe do `rustdraw mcp`, fica como está.
+#[cfg(windows)]
+fn attach_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+        fn GetStdHandle(std_handle: u32) -> *mut std::ffi::c_void;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    // SAFETY: funções do kernel32 sem ponteiros de entrada; falhar (sem
+    // console no processo pai) só deixa tudo como estava
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_null() {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|a| a.starts_with('-') || matches!(a.as_str(), "export" | "icon" | "mcp"))
+    {
+        attach_console();
+    }
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => usage(),
         Some("-V" | "--version") => {
@@ -188,10 +221,14 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
+    #[cfg(target_os = "macos")]
+    macos::install();
     eframe::run_native(
         "RustDraw",
         options,
         Box::new(move |cc| {
+            #[cfg(target_os = "macos")]
+            macos::set_context(&cc.egui_ctx);
             Ok(Box::new(RustDraw {
                 app: app::App::new(cc, open),
                 dark_applied: None,

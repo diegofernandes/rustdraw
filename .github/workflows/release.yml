@@ -130,6 +130,9 @@ jobs:
               ;;
             *)
               cp "target/${{ matrix.targets }}/release/rustdraw" "dist/$PKG/"
+              # atalho no menu, ícone e duplo clique em .excalidraw (install.sh)
+              cp packaging/linux/install.sh packaging/linux/rustdraw.desktop \
+                packaging/linux/rustdraw-mime.xml "dist/$PKG/"
               ;;
           esac
           cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md \
