@@ -65,6 +65,8 @@ pub enum Icon {
     SelectAll,
     AddToLibrary,
     Mcp,
+    GoTo,
+    Position,
 }
 
 impl Icon {
@@ -344,6 +346,19 @@ impl Icon {
                 "M9 3.4 V7.4 M15 3.4 V7.4 M6.4 7.4 H17.6 V11 C17.6 14.1 15.1 16.6 12 16.6 \
                  C8.9 16.6 6.4 14.1 6.4 11 Z M12 16.6 V20.8",
                 "",
+            ),
+            // mira: ir para a posição (Alt+G)
+            Icon::GoTo => (
+                "M12.6 5.2 C16.4 5.3 18.8 8.2 18.8 12 C18.8 15.8 15.8 18.8 12 18.8 \
+                 C8.2 18.8 5.2 15.8 5.2 12 C5.2 8.2 8.2 5.2 12.1 5.2 C13.2 5.2 14.2 5.5 15.1 6 \
+                 M12 2.6 V7.4 M12 16.6 V21.4 M2.6 12 H7.4 M16.6 12 H21.4",
+                "M10.5 12 a1.5 1.5 0 1 0 3 0 a1.5 1.5 0 1 0 -3 0",
+            ),
+            // eixos X e Y com um ponto e suas guias: a posição do cursor no rodapé
+            Icon::Position => (
+                "M4.6 3.4 V19.6 M4.2 19.4 H20.6 M2.8 5.4 L4.6 3.4 L6.4 5.4 \
+                 M18.6 17.6 L20.6 19.4 L18.6 21.2 M14.4 13.2 V16.8 M11.2 10 H7.6",
+                "M12.6 10 a1.8 1.8 0 1 0 3.6 0 a1.8 1.8 0 1 0 -3.6 0",
             ),
         }
     }
@@ -845,6 +860,8 @@ mod tests {
             Icon::SelectAll,
             Icon::AddToLibrary,
             Icon::Mcp,
+            Icon::GoTo,
+            Icon::Position,
         ];
         for icon in all {
             let (stroke, fill) = icon.paths();

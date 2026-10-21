@@ -1069,7 +1069,7 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 {
                     app.confirm = Some(Pending::Clear);
                 }
-                if item(ui, None, "Ir para posição…", "Alt+G") {
+                if item(ui, Some(Icon::GoTo), "Ir para posição…", "Alt+G") {
                     app.toggle_goto(app.canvas_rect());
                 }
                 if item(ui, Some(Icon::Help), "Atalhos e ajuda", "?") {
@@ -1335,6 +1335,7 @@ fn act_icon(app: &App, act: Act) -> Icon {
         Act::Zen => Icon::Zen,
         Act::ViewMode => Icon::ViewMode,
         Act::Stats => Icon::Stats,
+        Act::GoTo => Icon::GoTo,
         Act::CopyStyles => Icon::CopyStyles,
         Act::PasteStyles => Icon::PasteStyles,
         Act::Group => Icon::Group,
@@ -1519,8 +1520,17 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                     .inner_margin(Margin::same(3))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let (rect, resp) =
-                                ui.allocate_exact_size(vec2(128.0, 32.0), Sense::click());
+                            let text = format!("X {:.0}   Y {:.0}", p.x, p.y);
+                            let font = FontId::monospace(12.0);
+                            let text_w = ui
+                                .painter()
+                                .layout_no_wrap(text.clone(), font.clone(), Color32::WHITE)
+                                .size()
+                                .x;
+                            let (rect, resp) = ui.allocate_exact_size(
+                                vec2((text_w + 46.0).max(150.0), 32.0),
+                                Sense::click(),
+                            );
                             let open = app.goto.is_some();
                             let bg = if open {
                                 accent_bg(ui)
@@ -1529,13 +1539,21 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                             } else {
                                 Color32::TRANSPARENT
                             };
-                            ui.painter().rect_filled(rect, 7.0, bg);
-                            ui.painter().text(
-                                rect.center(),
-                                Align2::CENTER_CENTER,
-                                format!("X {:.0}   Y {:.0}", p.x, p.y),
-                                FontId::monospace(12.0),
-                                if open { accent_fg(ui) } else { fg(ui) },
+                            let col = if open { accent_fg(ui) } else { fg(ui) };
+                            let y = rect.center().y;
+                            let painter = ui.painter();
+                            painter.rect_filled(rect, 7.0, bg);
+                            let r = Rect::from_center_size(
+                                pos2(rect.left() + 17.0, y),
+                                vec2(18.0, 18.0),
+                            );
+                            icons::paint(painter, r, Icon::Position, col);
+                            painter.text(
+                                pos2(rect.left() + 34.0, y),
+                                Align2::LEFT_CENTER,
+                                text,
+                                font,
+                                col,
                             );
                             if resp
                                 .on_hover_text(keys("Posição do cursor · Ir para posição (Alt+G)"))
