@@ -6,7 +6,7 @@ use crate::icons::{self, Icon};
 use crate::model::{Element, parse_color};
 use crate::render;
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Id, Margin, Painter, Pos2, Rect, Response,
+    Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Margin, Painter, Pos2, Rect, Response,
     RichText, Sense, Shadow, Shape, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use serde_json::json;
@@ -964,6 +964,7 @@ fn toolbar(app: &mut App, ctx: &egui::Context, view: Rect) {
         Some((Tool::Select, Icon::Image, "Inserir imagem (9)")),
         Some((Tool::Eraser, Icon::Eraser, "Borracha (E ou 0)")),
         None,
+        Some((Tool::Note, Icon::Note, "Nota (N)")),
         Some((Tool::Frame, Icon::Frame, "Frame (F)")),
         Some((Tool::Laser, Icon::Laser, "Ponteiro laser (K)")),
     ];
@@ -1592,28 +1593,43 @@ fn text_editor(app: &mut App, ctx: &egui::Context) {
     let color = parse_color(&el.stroke_color)
         .map(|c| render::c32(c, app.dark, 1.0))
         .unwrap_or(Color32::BLACK);
+    // o rótulo de uma forma quebra na largura dela, como no canvas
+    let wrap = crate::label::container_id(el)
+        .and_then(|c| app.elements.iter().find(|e| e.id == c))
+        .map_or(f32::INFINITY, |c| {
+            crate::label::max_width(c).max(1.0) as f32 * z
+        });
+    // linhas alinhadas como no canvas, dentro da largura do texto
+    let halign = match el.text_align() {
+        "center" => Align::Center,
+        "right" => Align::RIGHT,
+        _ => Align::LEFT,
+    };
+    let width = el.width as f32 * z;
     let focus = ed.focus;
     egui::Area::new(Id::unique("text_editor"))
         .fixed_pos(pos)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             let ed = app.editing.as_mut().unwrap();
-            // sem quebra automática: a largura do texto é definida pelas linhas
+            // texto solto não quebra: a largura do texto é definida pelas linhas
             let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-                let job = egui::text::LayoutJob::simple(
+                let mut job = egui::text::LayoutJob::simple(
                     buf.as_str().to_owned(),
                     font.clone(),
                     color,
-                    f32::INFINITY,
+                    wrap,
                 );
+                job.halign = halign;
                 ui.fonts_mut(|f| f.layout_job(job))
             };
             let te = egui::TextEdit::multiline(&mut ed.buf)
                 .id(Id::unique("text_editor_field"))
                 .frame(Frame::NONE)
                 .margin(Margin::ZERO)
-                .desired_width(0.0)
+                .desired_width(width)
                 .desired_rows(1)
+                .align(Align2([halign, Align::TOP]))
                 .layouter(&mut layouter)
                 .background_color(Color32::TRANSPARENT);
             let r = ui.add(te);
@@ -1813,6 +1829,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Inserir imagem", "9"),
                     ("Borracha", "E ou 0"),
                     ("Frame", "F"),
+                    ("Nota", "N"),
                     ("Ponteiro laser", "K"),
                     ("Editar texto", "Enter"),
                     ("Renomear frame", "Enter · duplo clique no nome"),
@@ -2043,6 +2060,7 @@ fn hint(app: &App, ctx: &egui::Context) {
         (_, Tool::Text) => "Clique para escrever",
         (_, Tool::Eraser) => "Clique ou arraste sobre os elementos para apagar",
         (_, Tool::Laser) => "Arraste para apontar · o rastro some sozinho",
+        (_, Tool::Note) => "Clique para colar uma nota, ou arraste para escolher o tamanho",
         (_, Tool::Frame) => {
             "Arraste para criar um frame · o que ficar dentro passa a fazer parte dele"
         }

@@ -12,6 +12,7 @@ use crate::library::{self, LibraryItem};
 use crate::live;
 use crate::mcp;
 use crate::model::{Element, SceneFile, Style, clipboard_json, new_id, rand_seed};
+use crate::note;
 use crate::render::{self, Cam, PaintCtx};
 use crate::snap;
 use crate::watch::Watch;
@@ -42,6 +43,8 @@ pub enum Tool {
     Eraser,
     Frame,
     Laser,
+    /// Nota adesiva: retângulo amarelo com texto (ver `note`).
+    Note,
 }
 
 impl Tool {
@@ -294,6 +297,8 @@ pub struct App {
     bind_seen: HashMap<String, Vec<i64>>,
     /// Assinatura da cena na última sincronização (ver [`App::sync_bindings`]).
     synced: Option<u64>,
+    /// Assinatura da cena na última quebra dos rótulos (ver [`App::fit_labels`]).
+    fitted: Option<u64>,
     /// Modificadores do último quadro (Ctrl/Cmd desliga a ligação de setas).
     mods: Modifiers,
     /// Onde o nome de cada frame foi desenhado (tela), para clicar nele.
@@ -555,6 +560,7 @@ impl App {
             point_sel: None,
             bind_seen: HashMap::new(),
             synced: None,
+            fitted: None,
             mods: Modifiers::NONE,
             frame_labels: vec![],
             renaming: None,
@@ -681,6 +687,23 @@ impl App {
         self.mark_changed();
     }
 
+    /// Quebra os rótulos na largura das formas (só quando a cena mudou).
+    fn fit_labels(&mut self, painter: &egui::Painter) {
+        let sig = scene_signature(&self.elements);
+        if self.fitted == Some(sig) {
+            return;
+        }
+        // quebra com o mesmo layout do egui que o editor de texto usa
+        let hand_ok = self.hand_ok;
+        let font = |t: &Element| (t.font_size() as f32, t.font_family(), hand_ok);
+        label::fit(
+            &mut self.elements,
+            |t, text, max| render::wrap_text(painter, text, font(t), max as f32),
+            |t, line| render::text_width(painter, line, font(t)),
+        );
+        self.fitted = Some(scene_signature(&self.elements));
+    }
+
     /// Faz os textos dentro das formas e as setas ligadas acompanharem as
     /// formas que mudaram.
     ///
@@ -798,6 +821,7 @@ impl App {
         self.elements = f.elements;
         self.bind_seen.clear();
         self.synced = None;
+        self.fitted = None;
         self.bind_hint = None;
         self.selected.clear();
         self.undo.clear();
@@ -1464,6 +1488,7 @@ impl App {
             self.selected.retain(|s| ids.contains(s));
             self.bind_seen.clear();
             self.synced = None;
+            self.fitted = None;
             self.bind_hint = None;
             self.export_preview = None;
             self.toast(format!("Recarregado: {}", file_name(&path)));
@@ -2467,8 +2492,9 @@ impl App {
             return self.edit_text(&id);
         }
         let (container, frame_id) = (el.id.clone(), el.frame_id.clone());
+        let is_note = note::is_note(el);
         let c = geom::center(el);
-        self.start_text(c, Some(c.x as f64));
+        self.start_text(c, (!is_note).then_some(c.x as f64));
         let Some(ed) = &self.editing else { return };
         let t = self.elements.iter().position(|e| e.id == ed.id).unwrap();
         let ci = self
@@ -2479,6 +2505,9 @@ impl App {
         let mut text = self.elements.remove(t);
         text.frame_id = frame_id;
         label::attach(&mut text, &mut self.elements[ci]);
+        if is_note {
+            note::style_text(&mut text);
+        }
         // logo acima da forma, para não ficar atrás de quem está por cima dela
         self.elements.insert(ci + 1, text);
     }
@@ -2488,9 +2517,14 @@ impl App {
             return;
         };
         let center = (el.text_align() == "center").then(|| el.x + el.width / 2.0);
+        // num rótulo, `text` tem as quebras de linha automáticas; edita o original
+        let buf = match label::container_id(el) {
+            Some(_) => el.str_field("originalText").unwrap_or(el.text()),
+            None => el.text(),
+        };
         self.editing = Some(TextEditing {
             id: id.to_string(),
-            buf: el.text().to_string(),
+            buf: buf.to_string(),
             before: self.elements.clone(),
             focus: true,
             anchor_center: center,
@@ -2574,6 +2608,14 @@ impl App {
         let (id, buf, anchor) = (ed.id.clone(), ed.buf.clone(), ed.anchor_center);
         let hand_ok = self.hand_ok;
         if let Some(el) = self.get_mut(&id) {
+            // o rótulo é quebrado e medido por `fit_labels`
+            if label::container_id(el).is_some() {
+                if el.str_field("originalText") != Some(&buf) {
+                    el.set_text(&buf);
+                    el.touch();
+                }
+                return;
+            }
             if el.text() != buf {
                 el.set_text(&buf);
                 el.touch();
@@ -3165,7 +3207,7 @@ impl App {
         if over && pressed {
             if self.editing.is_some() {
                 self.finish_editing();
-                if self.tool == Tool::Text || dbl {
+                if matches!(self.tool, Tool::Text | Tool::Note) || dbl {
                     return;
                 }
             }
@@ -3369,7 +3411,13 @@ impl App {
                     moved: false,
                 };
             }
-            Tool::Rect | Tool::Diamond | Tool::Ellipse | Tool::Arrow | Tool::Line | Tool::Frame => {
+            Tool::Rect
+            | Tool::Diamond
+            | Tool::Ellipse
+            | Tool::Arrow
+            | Tool::Line
+            | Tool::Frame
+            | Tool::Note => {
                 if let Drag::LinearMulti { id, .. } = &self.drag {
                     // seta em cotovelo: o segundo clique termina
                     if self.elements.iter().any(|e| e.id == *id && e.is_elbow()) {
@@ -3391,8 +3439,11 @@ impl App {
                     return;
                 }
                 let origin = P::new(snap(p.x, g), snap(p.y, g));
-                let kind = self.tool.kind().unwrap();
+                let kind = self.tool.kind().unwrap_or("rectangle");
                 let mut el = Element::new(kind, origin.x as f64, origin.y as f64, &self.style);
+                if self.tool == Tool::Note {
+                    note::make(&mut el);
+                }
                 if kind != "frame" {
                     el.frame_id = frame::frame_at(&self.elements, p, &HashSet::new())
                         .map(|i| self.elements[i].id.clone());
@@ -3860,17 +3911,35 @@ impl App {
                     self.drag = Drag::LinearMulti { id, before };
                     return;
                 }
-                if tiny {
+                let is_note = note::is_note(el);
+                if tiny && is_note {
+                    // um clique cria a nota do tamanho padrão, centrada no clique
+                    if let Some(el) = self.get_mut(&id) {
+                        el.x = origin.x as f64 - note::SIZE / 2.0;
+                        el.y = origin.y as f64 - note::SIZE / 2.0;
+                        el.width = note::SIZE;
+                        el.height = note::SIZE;
+                        el.touch();
+                    }
+                } else if tiny {
                     self.elements.retain(|e| e.id != id);
                     self.selected.clear();
                     return;
                 }
-                if frame::is_frame(el) {
+                if self
+                    .elements
+                    .iter()
+                    .any(|e| e.id == id && frame::is_frame(e))
+                {
                     frame::refresh_members(&mut self.elements, &id);
                 }
                 self.commit(before);
                 if !self.tool_locked {
                     self.tool = Tool::Select;
+                }
+                // a nota já abre para escrever
+                if is_note && let Some(i) = self.elements.iter().position(|e| e.id == id) {
+                    self.edit_text_at(i);
                 }
             }
             Drag::FreeDraw { before, .. } => self.commit(before),
@@ -4239,6 +4308,7 @@ impl App {
             (Key::E, Tool::Eraser),
             (Key::Num0, Tool::Eraser),
             (Key::F, Tool::Frame),
+            (Key::N, Tool::Note),
             // K alterna entre o laser e a seleção
             (Key::K, Tool::Laser),
         ];
@@ -4308,6 +4378,7 @@ impl App {
             }
         }
         self.update_editing_text(&painter);
+        self.fit_labels(&painter);
         self.sync_bindings();
 
         let bg = crate::model::parse_color(&self.view_bg).unwrap_or([255, 255, 255, 255]);
@@ -5081,6 +5152,32 @@ mod tests {
         );
         let label = &app.elements[label::label_of(&app.elements, "a").unwrap()];
         assert!(geom::center(label).y > 300.0, "o rótulo acompanhou a forma");
+    }
+
+    #[test]
+    fn a_click_with_the_note_tool_creates_a_note_ready_to_write() {
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        app.set_tool(Tool::Note);
+        let p = P::new(300.0, 200.0);
+        app.on_press(p, Pos2::ZERO, Modifiers::NONE);
+        app.on_release(p);
+        assert_eq!(app.elements.len(), 2, "a nota e o texto dela");
+        let n = &app.elements[0];
+        assert!(note::is_note(n));
+        assert_eq!((n.x, n.y, n.width, n.height), (200.0, 100.0, 200.0, 200.0));
+        let t = &app.elements[1];
+        assert_eq!(label::container_id(t), Some(n.id.as_str()));
+        assert_eq!(t.text_align(), "left");
+        assert_eq!(t.str_field("verticalAlign"), Some("top"));
+        assert_eq!(app.editing.as_ref().map(|e| &e.id), Some(&t.id));
+        assert_eq!(app.tool, Tool::Select);
+
+        // sem texto, a nota fica; desfazer tira a nota
+        app.finish_editing();
+        assert_eq!(app.elements.len(), 1);
+        assert!(note::is_note(&app.elements[0]));
+        app.undo();
+        assert!(app.elements.is_empty());
     }
 
     #[test]

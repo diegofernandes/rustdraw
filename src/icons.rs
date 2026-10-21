@@ -26,6 +26,7 @@ pub enum Icon {
     Eraser,
     Frame,
     Laser,
+    Note,
     Lock(bool),
     Menu,
     Undo,
@@ -144,6 +145,13 @@ impl Icon {
                  L11.6 14.8 L9.4 12.6 M3.4 16.5 H5.2 M4.3 12.5 L5.8 13.5 M7.5 20.6 V18.9 \
                  M4.5 19.7 L5.9 18.3",
                 "M6.3 16.4 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0",
+            ),
+            // folha com a ponta dobrada (preenchida), uma linha à mão e uma reta
+            Icon::Note => (
+                "M3.6 4.1 H20.3 M19.9 3.7 V14.2 M20.2 13.9 L13.9 20.2 M14.3 19.9 H4 M4.1 20.3 V3.7 \
+                 M7.4 9.4 C8.4 8.2 9.6 8.2 10.6 9.4 C11.6 10.6 12.8 10.6 13.8 9.4 C14.6 8.4 15.6 8.4 16.6 9.2 \
+                 M7.6 13.4 H11.6",
+                "M14.3 14.3 L19.6 14.3 L14.3 19.6 z",
             ),
             Icon::Menu => ("M4 6.6 H20.2 M3.8 12 H20 M4 17.4 H20.2", ""),
             Icon::Undo => (
@@ -820,6 +828,7 @@ mod tests {
             Icon::Eraser,
             Icon::Frame,
             Icon::Laser,
+            Icon::Note,
             Icon::Lock(true),
             Icon::Lock(false),
             Icon::Menu,

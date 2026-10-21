@@ -13,6 +13,16 @@ use std::collections::{HashMap, HashSet};
 /// Folga entre o texto e a borda da forma (a mesma do Excalidraw).
 const PADDING: f64 = 5.0;
 
+/// Folga (dos lados, em cima e embaixo) do texto dentro de `c`: as notas
+/// têm mais respiro.
+fn padding(c: &Element) -> (f64, f64) {
+    if crate::note::is_note(c) {
+        crate::note::PADDING
+    } else {
+        (PADDING, PADDING)
+    }
+}
+
 /// Formas que podem conter um rótulo.
 pub fn can_contain(e: &Element) -> bool {
     matches!(e.kind.as_str(), "rectangle" | "ellipse" | "diamond")
@@ -89,12 +99,151 @@ fn has_text(bound: &[Value], id: &str) -> bool {
     })
 }
 
+/// Largura que o texto pode ocupar dentro de `c` (`getBoundTextMaxWidth`
+/// do Excalidraw).
+pub fn max_width(c: &Element) -> f64 {
+    let w = geom::local_box(c).width() as f64;
+    let inner = match c.kind.as_str() {
+        "ellipse" => (w / 2.0 * std::f64::consts::SQRT_2).round(),
+        "diamond" => (w / 2.0).round(),
+        _ => w,
+    };
+    inner - padding(c).0 * 2.0
+}
+
+/// Altura que a forma `kind` precisa para caber um texto de altura `h`
+/// (`computeContainerDimensionForBoundText` do Excalidraw).
+fn needed_height(c: &Element, h: f64) -> f64 {
+    let d = h.ceil() + padding(c).1 * 2.0;
+    match c.kind.as_str() {
+        "ellipse" => (d / std::f64::consts::SQRT_2 * 2.0).round(),
+        "diamond" => 2.0 * d,
+        _ => d,
+    }
+}
+
+/// Quebra o texto de cada rótulo na largura da sua forma e aumenta a altura
+/// da forma quando o texto não cabe, como o Excalidraw faz. `wrap` quebra o
+/// texto do rótulo `t` numa largura e `width` mede uma linha dele. Devolve
+/// `true` se algo mudou.
+pub fn fit(
+    els: &mut [Element],
+    wrap: impl Fn(&Element, &str, f64) -> String,
+    width: impl Fn(&Element, &str) -> f64,
+) -> bool {
+    let index: HashMap<String, usize> = els
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| can_contain(e))
+        .map(|(i, e)| (e.id.clone(), i))
+        .collect();
+    let mut changed = false;
+    for i in 0..els.len() {
+        if let Some(&c) = container_id(&els[i]).and_then(|c| index.get(c)) {
+            changed |= fit_one(els, i, c, &wrap, &width);
+        }
+    }
+    changed
+}
+
+/// [`fit`] só do rótulo `i`, que está na forma `c`.
+fn fit_one(
+    els: &mut [Element],
+    i: usize,
+    c: usize,
+    wrap: &impl Fn(&Element, &str, f64) -> String,
+    width: &impl Fn(&Element, &str) -> f64,
+) -> bool {
+    let mut changed = false;
+    let max = max_width(&els[c]);
+    let t = &els[i];
+    let source = t.str_field("originalText").unwrap_or(t.text());
+    let text = wrap(t, source, max);
+    let lines = text.split('\n').count() as f64;
+    let w = text.split('\n').map(|l| width(t, l)).fold(1.0, f64::max);
+    let h = lines * t.font_size() * t.line_height();
+    let t = &mut els[i];
+    let far = |a: f64, b: f64| (a - b).abs() > 0.01;
+    if t.text() != text || far(t.width, w) || far(t.height, h) {
+        t.set_field("text", json!(text));
+        t.width = w;
+        t.height = h;
+        t.touch();
+        changed = true;
+    }
+    let c = &mut els[c];
+    let need = needed_height(c, h);
+    if c.height >= 0.0 && c.height < need - 0.01 {
+        c.height = need;
+        c.touch();
+        changed = true;
+    }
+    changed
+}
+
+/// Quebra e põe no lugar o rótulo da forma `container` (sem o editor: quem
+/// mede é `width`). Usado ao editar o arquivo por comandos.
+pub fn refit(els: &mut [Element], container: &str, width: impl Fn(&Element, &str) -> f64) {
+    let Some(c) = els.iter().position(|e| e.id == container && can_contain(e)) else {
+        return;
+    };
+    let Some(i) = els.iter().position(|e| container_id(e) == Some(container)) else {
+        return;
+    };
+    let wrap = |t: &Element, s: &str, max: f64| wrap(s, max, |l| width(t, l));
+    fit_one(els, i, c, &wrap, &width);
+    let (x, y, angle) = placement(&els[i], &els[c]);
+    let t = &mut els[i];
+    (t.x, t.y, t.angle) = (x, y, angle);
+    t.touch();
+}
+
+/// Quebra `text` em linhas de no máximo `max` de largura, palavra a palavra;
+/// uma palavra maior que a linha é cortada entre letras.
+pub fn wrap(text: &str, max: f64, width: impl Fn(&str) -> f64) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        if width(para) <= max {
+            out.push(para.to_string());
+            continue;
+        }
+        let mut line = String::new();
+        for word in para.split(' ') {
+            let joined = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if width(&joined) <= max {
+                line = joined;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            // a palavra sozinha não cabe: corta onde der (pelo menos uma letra)
+            for ch in word.chars() {
+                let mut next = line.clone();
+                next.push(ch);
+                if !line.is_empty() && width(&next) > max {
+                    out.push(std::mem::replace(&mut line, ch.to_string()));
+                } else {
+                    line = next;
+                }
+            }
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
 /// Onde o rótulo `t` deve ficar dentro de `c` (x, y do canto e ângulo).
 fn placement(t: &Element, c: &Element) -> (f64, f64, f64) {
     let b = geom::local_box(c);
     let (w, h) = (b.width() as f64, b.height() as f64);
-    let room_x = (w / 2.0 - PADDING - t.width / 2.0).max(0.0);
-    let room_y = (h / 2.0 - PADDING - t.height / 2.0).max(0.0);
+    let (px, py) = padding(c);
+    let room_x = (w / 2.0 - px - t.width / 2.0).max(0.0);
+    let room_y = (h / 2.0 - py - t.height / 2.0).max(0.0);
     let dx = match t.text_align() {
         "left" => -room_x,
         "right" => room_x,
@@ -301,5 +450,47 @@ mod tests {
             els[0].bound_elements,
             Some(json!([{"id": "a", "type": "arrow"}, {"id": "t", "type": "text"}]))
         );
+    }
+
+    /// Cada letra mede 10.
+    fn w10(s: &str) -> f64 {
+        s.chars().count() as f64 * 10.0
+    }
+
+    fn fit10(els: &mut [Element]) -> bool {
+        fit(els, |_, s, max| wrap(s, max, w10), |_, s| w10(s))
+    }
+
+    #[test]
+    fn wrap_breaks_between_words_and_inside_long_ones() {
+        assert_eq!(wrap("abc def", 100.0, w10), "abc def");
+        assert_eq!(wrap("abc def ghi", 70.0, w10), "abc def\nghi");
+        assert_eq!(wrap("um\n\ndois", 40.0, w10), "um\n\ndois");
+        assert_eq!(wrap("abcdefg x", 30.0, w10), "abc\ndef\ng x");
+        // nem uma letra cabe: uma por linha, sem travar
+        assert_eq!(wrap("ab", -5.0, w10), "a\nb");
+    }
+
+    #[test]
+    fn fit_wraps_the_label_and_grows_the_shape() {
+        let mut els = scene();
+        els[1].set_text("um texto que não cabe na largura");
+        assert!(fit10(&mut els));
+        // 200 de largura menos a folga dos dois lados: 19 letras por linha
+        let t = &els[1];
+        assert_eq!(t.text(), "um texto que não\ncabe na largura");
+        assert_eq!(
+            t.str_field("originalText"),
+            Some("um texto que não cabe na largura")
+        );
+        assert_eq!(t.width, 160.0);
+        assert_eq!(t.height, 2.0 * 20.0 * 1.25);
+        assert_eq!(els[0].height, 100.0, "coube: a forma não muda");
+        assert!(!fit10(&mut els), "já está quebrado");
+
+        // texto mais alto que a forma: a forma cresce
+        els[1].set_text("a\nb\nc\nd\ne");
+        fit10(&mut els);
+        assert_eq!(els[0].height, 5.0 * 25.0 + 10.0);
     }
 }

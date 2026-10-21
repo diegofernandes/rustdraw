@@ -8,7 +8,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 
 ## Recursos
 
-- **Formas**: retângulo, losango, elipse, seta, linha, desenho livre e texto
+- **Formas**: retângulo, losango, elipse, seta, linha, desenho livre e texto. Duplo clique numa forma escreve dentro dela; como no Excalidraw, o texto quebra na largura da forma e a forma cresce quando ele não cabe
 - **Imagens**: cole um print com `Ctrl+V`, arraste PNG/JPG/GIF/WebP para a janela ou use `9` para escolher o arquivo. A imagem fica embutida no `.excalidraw` (campo `files`, igual ao Excalidraw), pode ser movida, redimensionada (mantém a proporção; `Shift` libera), girada e invertida, e sai no PNG e no SVG exportados
 - **Visual "desenhado à mão"**: traços irregulares com os mesmos algoritmos do rough.js (o motor do Excalidraw), determinísticos por `seed`
 - **Estilos**: cor de traço e fundo, preenchimento (hachura, hachura cruzada, sólido), espessura, tracejado/pontilhado, "desleixo" (arquiteto/artista/cartunista), bordas arredondadas, opacidade, pontas de seta (seta, triângulo, barra, ponto), fonte (à mão/normal/código), tamanho e alinhamento
@@ -18,6 +18,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Pontos de edição**: numa linha ou seta selecionada, arraste a alça do meio de um segmento (ou dê duplo clique na linha) para criar um ponto; clique nos pontos para selecioná-los (Shift soma), arraste para mover e `Delete` apaga. Em setas em cotovelo, arraste o meio de um segmento para deslocá-lo (ele fica fixo); duplo clique nessa alça devolve o segmento à rota automática
 - **Setas que grudam nas formas**: a ponta da seta liga num retângulo, losango, elipse ou texto e acompanha a forma quando ela é movida, redimensionada ou girada. Perto do meio de um lado, encaixa nesse **ponto fixo**; no resto da forma fica **livre**, mirando o centro e parando no contorno. Segure `Ctrl` (`Cmd` no macOS) ao arrastar para não grudar; mover só a seta a solta
 - **Frames**: áreas nomeadas (ferramenta `F`) para montar várias telas ou slides num desenho só. O que fica dentro do frame é recortado pela borda dele e anda junto quando ele é movido; arrastar um elemento para dentro ou para fora de um frame o coloca ou tira dele. Duplo clique no nome (ou `Enter` com o frame selecionado) renomeia. Apagar ou duplicar o frame leva o conteúdo junto. Para exportar um frame sozinho, selecione-o e use "Exportar frame…" no botão direito (ou marque "Somente o frame selecionado" na exportação): sai só o conteúdo, do tamanho exato do frame
+- **Notas adesivas**: ferramenta `N`. Um clique cola uma nota amarela (sem borda, com sombra e a ponta de baixo dobrada) e já abre para escrever; arrastar escolhe o tamanho. O texto começa em cima à esquerda, quebra na largura da nota e a nota cresce para baixo quando ele não cabe. Trocar a cor de fundo muda também a cor da dobra. No arquivo, a nota é um retângulo com texto dentro, então o Excalidraw abre normalmente (como um retângulo amarelo)
 - **Ponteiro laser**: para apresentar (ferramenta `K`, como no Excalidraw). Arrastar deixa um rastro vermelho que some sozinho em um segundo, sem criar elementos nem mexer no histórico. Continua funcionando no modo de visualização se estiver ativo ao entrar nele; `K` de novo volta para a seleção
 - **Biblioteca de formas**: guarde formas e grupos para reutilizar (botão **Biblioteca** no canto superior direito, `+` ou "Adicionar à biblioteca" no botão direito). Clique num item para inserir no centro da tela ou arraste para posicionar; `Shift+clique` marca itens para exportar ou remover. O botão direito num item renomeia, edita no canvas (altere, selecione e clique em "Salvar no item"), reordena, exporta ou remove; também dá para reordenar arrastando um item sobre outro. Remoções e edições podem ser desfeitas no próprio painel. Importa e exporta arquivos `.excalidrawlib` (versões 1 e 2) — dá para usar bibliotecas baixadas do Excalidraw sem depender do site. A biblioteca fica salva localmente no diretório de dados do usuário
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
@@ -101,7 +102,7 @@ Para editar arquivos sem o editor aberto, use o `rustdraw mcp` também no Claude
 |---|---|
 | `new_scene` | Cria um desenho vazio |
 | `get_scene` | Lista os elementos (id, tipo, posição, tamanho, texto, estilo, ligações) |
-| `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`) e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
+| `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`), `{"type": "note", "label": "..."}` cria uma nota adesiva e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
 | `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
 | `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
 | `export_image` | Grava PNG ou SVG (do desenho todo ou de um frame, em `frame`) |
@@ -144,6 +145,7 @@ Pelo `rustdraw mcp`, com `file` (ou um arquivo padrão na linha de comando), a f
 | Frame | `F` | | Renomear frame | `Enter` / duplo clique no nome |
 | Encaixar em objetos | `Alt+S` (`Ctrl` inverte ao arrastar) | | Ir para posição (X, Y) | `Alt+G` |
 | Ponteiro laser | `K` | | | |
+| Nota | `N` | | | |
 
 Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`. O botão direito abre o menu de opções.
 
@@ -163,6 +165,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |
 | `src/icons.rs` | Ícones da interface e ícone do app (caminhos SVG desenhados à mão) |
 | `src/frame.rs` | Frames: quem está dentro de qual, recorte, nomes |
+| `src/note.rs` | Notas adesivas: estilo, marca, dobra e sombra da nota |
 | `src/laser.rs` | Ponteiro laser: rastro que afina e some com o tempo |
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |

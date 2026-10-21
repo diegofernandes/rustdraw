@@ -215,6 +215,41 @@ pub fn paint_prims(pc: &PaintCtx, prims: &[Prim]) {
 
 /// Mede um texto no tamanho de mundo: (largura, altura) usando a regra de
 /// altura de linha do Excalidraw.
+/// Tamanho, família e se a fonte à mão carregou.
+pub type TextFont = (f32, i64, bool);
+
+/// Largura de uma linha de texto.
+pub fn text_width(painter: &Painter, line: &str, (size, fam, hand_ok): TextFont) -> f64 {
+    let font = FontId::new(size, font_family(fam, hand_ok));
+    painter
+        .layout_no_wrap(line.to_string(), font, Color32::BLACK)
+        .size()
+        .x as f64
+}
+
+/// `text` com quebras de linha onde o egui quebraria na largura `max`.
+pub fn wrap_text(
+    painter: &Painter,
+    text: &str,
+    (size, fam, hand_ok): TextFont,
+    max: f32,
+) -> String {
+    let font = FontId::new(size, font_family(fam, hand_ok));
+    let galley = painter.layout(text.to_string(), font, Color32::BLACK, max.max(1.0));
+    let n = galley.rows.len();
+    let mut out = String::with_capacity(text.len() + n);
+    for (i, row) in galley.rows.iter().enumerate() {
+        let line = row.text();
+        // numa quebra automática, o espaço que sobra no fim da linha some
+        let soft = !row.ends_with_newline && i + 1 < n;
+        out.push_str(if soft { line.trim_end() } else { &line });
+        if i + 1 < n {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 pub fn measure_text(
     painter: &Painter,
     text: &str,

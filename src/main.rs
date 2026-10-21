@@ -26,6 +26,7 @@ mod live;
 mod macos;
 mod mcp;
 mod model;
+mod note;
 mod render;
 mod rough;
 mod snap;
