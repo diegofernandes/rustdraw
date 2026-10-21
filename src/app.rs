@@ -152,6 +152,15 @@ pub struct TextEditing {
     pub anchor_center: Option<f64>,
 }
 
+/// Diálogo "Ir para posição" (Alt+G): o texto digitado em cada campo.
+pub struct GoTo {
+    pub x: String,
+    pub y: String,
+    /// Recém-aberto: foca o campo X e seleciona o texto.
+    pub focus: bool,
+    pub error: bool,
+}
+
 /// Nome de frame em edição (duplo clique no nome, ou Enter com o frame selecionado).
 pub struct FrameRename {
     pub id: String,
@@ -261,6 +270,12 @@ pub struct App {
     pub toast: Option<(String, f64)>,
     pub hand_ok: bool,
     pointer_world: P,
+    /// Onde o ponteiro esteve sobre o canvas pela última vez (tela); o rodapé
+    /// mostra o ponto da cena que está ali, que muda junto com a câmera.
+    pub cursor: Option<Pos2>,
+    pub goto: Option<GoTo>,
+    /// Ponto onde "Ir para posição" levou a tela e quando, para marcá-lo.
+    goto_mark: Option<(P, f64)>,
     last_change: f64,
     autosave_pending: bool,
     last_title: String,
@@ -434,6 +449,25 @@ fn take_key(i: &mut egui::InputState, m: Modifiers, key: Key, physical: bool) ->
     hit
 }
 
+/// Um número do "Ir para posição": aceita vírgula decimal ("12,5") e o sinal
+/// de menos tipográfico ("−45").
+fn parse_coord(s: &str) -> Option<f32> {
+    let s = s.trim().replace('−', "-").replace(',', ".");
+    s.parse::<f32>().ok().filter(|v| v.is_finite())
+}
+
+/// Os dois números colados num campo só: "120 -45", "120; -45" ou "120, -45"
+/// (a vírgula só separa quando vem seguida de espaço, senão é decimal).
+fn parse_point(s: &str) -> Option<(f32, f32)> {
+    let s = s.replace(';', " ").replace(", ", " ");
+    let mut it = s.split_whitespace();
+    let (x, y) = (it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    Some((parse_coord(x)?, parse_coord(y)?))
+}
+
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / GRID).round() * GRID } else { v }
 }
@@ -508,6 +542,9 @@ impl App {
             toast: None,
             hand_ok,
             pointer_world: P::new(0.0, 0.0),
+            cursor: None,
+            goto: None,
+            goto_mark: None,
             last_change: 0.0,
             autosave_pending: false,
             last_title: String::new(),
@@ -2706,6 +2743,49 @@ impl App {
         );
     }
 
+    /// Área do canvas na tela, do último quadro.
+    pub fn canvas_rect(&self) -> egui::Rect {
+        self.view
+    }
+
+    /// Centraliza a tela no ponto `p` da cena, sem mudar o zoom, e marca o ponto.
+    pub fn go_to(&mut self, view: egui::Rect, p: P) {
+        let z = self.cam.zoom;
+        self.cam.scroll = P::new(
+            (view.center().x - view.min.x) / z - p.x,
+            (view.center().y - view.min.y) / z - p.y,
+        );
+        self.goto_mark = Some((p, self.now));
+        self.ctx.request_repaint();
+    }
+
+    /// Alt+G: abre (ou fecha) o "Ir para posição", com o centro da tela nos campos.
+    pub fn toggle_goto(&mut self, view: egui::Rect) {
+        if self.goto.take().is_some() {
+            return;
+        }
+        let c = self.cam.w(view.center());
+        self.goto = Some(GoTo {
+            x: format!("{:.0}", c.x),
+            y: format!("{:.0}", c.y),
+            focus: true,
+            error: false,
+        });
+    }
+
+    /// "Ir" do diálogo: lê os campos e vai até o ponto; com erro, mantém aberto.
+    pub fn submit_goto(&mut self, view: egui::Rect) {
+        let Some(g) = &mut self.goto else { return };
+        let target = parse_point(&g.x).or_else(|| Some((parse_coord(&g.x)?, parse_coord(&g.y)?)));
+        match target {
+            Some((x, y)) => {
+                self.goto = None;
+                self.go_to(view, P::new(x, y));
+            }
+            None => g.error = true,
+        }
+    }
+
     /// PgUp/PgDn: rola uma tela na vertical (com Shift, na horizontal).
     pub fn scroll_page(&mut self, view: egui::Rect, down: bool, horizontal: bool) {
         let sign = if down { -1.0 } else { 1.0 };
@@ -3099,6 +3179,9 @@ impl App {
         let Some(pos) = pos else { return };
         let wp = self.cam.w(pos);
         self.pointer_world = wp;
+        if over {
+            self.cursor = Some(pos);
+        }
         // arrastando um item da biblioteca: o painel cuida do ponteiro
         if self.library_drag.is_some() {
             return;
@@ -3969,6 +4052,10 @@ impl App {
             self.context_menu = None;
             return;
         }
+        if self.goto.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.goto = None;
+            return;
+        }
         let n = Modifiers::NONE;
         let sh = Modifiers::SHIFT;
         let alt = Modifiers::ALT;
@@ -4026,6 +4113,9 @@ impl App {
             if k(m, Key::PageDown) {
                 self.scroll_page(view, true, m == sh);
             }
+        }
+        if kc(alt, Key::G) {
+            self.toggle_goto(view);
         }
         if ctx.input_mut(|i| i.consume_key(n, Key::Questionmark)) || k(n, Key::F1) {
             self.show_help = !self.show_help;
@@ -4485,6 +4575,7 @@ impl App {
                 StrokeKind::Middle,
             );
         }
+        self.paint_goto_mark(&painter);
         self.laser.prune(self.now);
         if self.laser.active() {
             painter.extend(self.laser.shapes(self.now, |p| self.cam.s(p)));
@@ -4539,6 +4630,28 @@ impl App {
             labels.push((el.id.clone(), label));
         }
         self.frame_labels = labels;
+    }
+
+    /// Mira no ponto de "Ir para posição", que some em pouco mais de um segundo.
+    fn paint_goto_mark(&mut self, painter: &egui::Painter) {
+        const LIFE: f64 = 1.6;
+        let Some((p, at)) = self.goto_mark else {
+            return;
+        };
+        let t = (self.now - at) / LIFE;
+        if t >= 1.0 {
+            self.goto_mark = None;
+            return;
+        }
+        let a = (1.0 - t * t) as f32;
+        let s = self.cam.s(p);
+        let stroke = Stroke::new(1.5, SELECTION.gamma_multiply(a));
+        painter.circle_stroke(s, 10.0 + 8.0 * t as f32, stroke);
+        for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
+            painter.line_segment([s - d * 18.0, s - d * 5.0], stroke);
+            painter.line_segment([s + d * 5.0, s + d * 18.0], stroke);
+        }
+        painter.ctx().request_repaint();
     }
 
     /// Guias do encaixe em objetos: linhas com um "x" em cada ponto alinhado.
@@ -5227,5 +5340,41 @@ mod tests {
             .push(key_event(Key::Exclamationmark, Key::Num1, Modifiers::SHIFT));
         assert!(!take_key(&mut i, Modifiers::SHIFT, Key::Num1, false));
         assert!(take_key(&mut i, Modifiers::SHIFT, Key::Num1, true));
+    }
+
+    #[test]
+    fn goto_reads_numbers_the_way_people_type_them() {
+        assert_eq!(parse_coord(" 120 "), Some(120.0));
+        assert_eq!(parse_coord("12,5"), Some(12.5));
+        assert_eq!(parse_coord("−45"), Some(-45.0));
+        assert_eq!(parse_coord("abc"), None);
+        assert_eq!(parse_coord("1e40"), None);
+        assert_eq!(parse_point("120, -45"), Some((120.0, -45.0)));
+        assert_eq!(parse_point("120;-45"), Some((120.0, -45.0)));
+        assert_eq!(parse_point("12,5 7,5"), Some((12.5, 7.5)));
+        assert_eq!(parse_point("12,5"), None);
+        assert_eq!(parse_point("1 2 3"), None);
+    }
+
+    #[test]
+    fn goto_centers_the_point_and_keeps_the_zoom() {
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        app.cam.origin = view.min;
+        app.cam.zoom = 2.0;
+        app.toggle_goto(view);
+        let g = app.goto.as_mut().unwrap();
+        (g.x, g.y) = ("1000".into(), "-250,5".into());
+        app.submit_goto(view);
+        assert!(app.goto.is_none());
+        assert_eq!(app.cam.zoom, 2.0);
+        let c = app.cam.w(view.center());
+        assert!((c.x - 1000.0).abs() < 1e-3 && (c.y + 250.5).abs() < 1e-3);
+        // texto inválido mantém o diálogo aberto e a tela onde está
+        app.toggle_goto(view);
+        app.goto.as_mut().unwrap().y = "?".into();
+        app.submit_goto(view);
+        assert!(app.goto.as_ref().is_some_and(|g| g.error));
+        assert!((app.cam.w(view.center()).x - 1000.0).abs() < 1e-3);
     }
 }
