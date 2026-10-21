@@ -1052,6 +1052,9 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 {
                     app.confirm = Some(Pending::Clear);
                 }
+                if item(ui, None, "Ir para posição…", "Alt+G") {
+                    app.toggle_goto(app.canvas_rect());
+                }
                 if item(ui, Some(Icon::Help), "Atalhos e ajuda", "?") {
                     app.show_help = true;
                 }
@@ -1136,6 +1139,7 @@ enum Act {
     Zen,
     ViewMode,
     Stats,
+    GoTo,
     CopyStyles,
     PasteStyles,
     Group,
@@ -1178,8 +1182,10 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
         ),
         Item("Estatísticas", "Alt+/", Act::Stats, Some(app.show_stats)),
     ];
+    let goto = Item("Ir para posição…", "Alt+G", Act::GoTo, None);
     let mut v = vec![];
     if app.view_mode {
+        v.extend([goto, Sep]);
         v.extend(toggles);
     } else if !on_element {
         v.push(Item("Colar", "Ctrl+V", Act::Paste, None));
@@ -1196,7 +1202,7 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
         if app.has_locked() {
             v.push(Item("Destravar tudo", "", Act::UnlockAll, None));
         }
-        v.push(Sep);
+        v.extend([Sep, goto, Sep]);
         v.extend(toggles);
     } else {
         // no macOS, "até o fim" é Cmd+Alt+[ ]; nos demais, Ctrl+Shift+[ ]
@@ -1290,6 +1296,7 @@ fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
         Act::Zen => app.zen_mode = !app.zen_mode,
         Act::ViewMode => app.toggle_view_mode(),
         Act::Stats => app.show_stats = !app.show_stats,
+        Act::GoTo => app.toggle_goto(app.canvas_rect()),
         Act::CopyStyles => app.copy_styles(),
         Act::PasteStyles => app.paste_styles(),
         Act::Group => app.group_selected(true),
@@ -1439,6 +1446,38 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
                                     app.redo();
                                 }
                             });
+                        });
+                    });
+                // posição do ponteiro na cena; clicar abre o "Ir para posição"
+                let p = app.cam.w(app.cursor.unwrap_or(view.center()));
+                panel_frame(ui)
+                    .inner_margin(Margin::same(3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(vec2(128.0, 32.0), Sense::click());
+                            let open = app.goto.is_some();
+                            let bg = if open {
+                                accent_bg(ui)
+                            } else if resp.hovered() {
+                                hover_bg(ui)
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(rect, 7.0, bg);
+                            ui.painter().text(
+                                rect.center(),
+                                Align2::CENTER_CENTER,
+                                format!("X {:.0}   Y {:.0}", p.x, p.y),
+                                FontId::monospace(12.0),
+                                if open { accent_fg(ui) } else { fg(ui) },
+                            );
+                            if resp
+                                .on_hover_text(keys("Posição do cursor · Ir para posição (Alt+G)"))
+                                .clicked()
+                            {
+                                app.toggle_goto(view);
+                            }
                         });
                     });
             });
@@ -1704,6 +1743,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Ajustar todos os elementos", "Shift+1"),
                     ("Ajustar à seleção", "Shift+2 · Shift+3"),
                     ("Rolar a página", "PgUp/PgDn · Shift+PgUp/PgDn"),
+                    ("Ir para posição (X, Y)", "Alt+G"),
                     ("Modo zen", "Alt+Z"),
                     ("Grade", "Ctrl+'"),
                     ("Encaixar em objetos", "Alt+S"),
@@ -1960,6 +2000,7 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
     bottom_bar(app, ctx, view);
     mode_exit_button(app, ctx);
     stats_window(app, ctx);
+    goto_window(app, ctx, view);
     app.open_picker = None;
     text_editor(app, ctx);
     frame_name_editor(app, ctx);
@@ -2286,6 +2327,67 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
     }
     if !app.live_sessions.log.is_empty() {
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
+    }
+}
+
+/// "Ir para posição" (Alt+G): X e Y da cena; a tela centraliza nesse ponto.
+fn goto_window(app: &mut App, ctx: &egui::Context, view: Rect) {
+    let Some(g) = &mut app.goto else { return };
+    let mut open = true;
+    let mut go = false;
+    egui::Window::new("Ir para posição")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::LEFT_BOTTOM, vec2(12.0, -64.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let x_id = Id::unique("goto_x");
+                for (label, buf, id) in
+                    [("X", &mut g.x, x_id), ("Y", &mut g.y, Id::unique("goto_y"))]
+                {
+                    ui.label(label);
+                    let out = egui::TextEdit::singleline(buf)
+                        .id(id)
+                        .desired_width(72.0)
+                        .show(ui);
+                    if out.response.changed() {
+                        g.error = false;
+                    }
+                    // ao entrar no campo (abrir, Tab, clique), seleciona o texto para digitar por cima
+                    let opening = g.focus && id == x_id;
+                    if opening && !out.response.has_focus() {
+                        out.response.request_focus();
+                    } else if opening || out.response.gained_focus() {
+                        g.focus &= !opening;
+                        let mut st = out.state;
+                        let all = egui::text::CCursorRange::select_all_str(buf);
+                        st.cursor.set_char_range(Some(all));
+                        st.store(ui.ctx(), id);
+                    }
+                    if out.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        go = true;
+                    }
+                }
+                go |= ui.button("Ir").clicked();
+            });
+            let (msg, col) = if g.error {
+                (
+                    "Digite números, como 120 e -45",
+                    ui.visuals().error_fg_color,
+                )
+            } else {
+                (
+                    "Centraliza a tela neste ponto · Enter para ir",
+                    ui.visuals().weak_text_color(),
+                )
+            };
+            ui.label(RichText::new(msg).size(11.0).color(col));
+        });
+    if !open {
+        app.goto = None;
+    } else if go {
+        app.submit_goto(view);
     }
 }
 

@@ -22,6 +22,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Biblioteca de formas**: guarde formas e grupos para reutilizar (botão **Biblioteca** no canto superior direito, `+` ou "Adicionar à biblioteca" no botão direito). Clique num item para inserir no centro da tela ou arraste para posicionar; `Shift+clique` marca itens para exportar ou remover. O botão direito num item renomeia, edita no canvas (altere, selecione e clique em "Salvar no item"), reordena, exporta ou remove; também dá para reordenar arrastando um item sobre outro. Remoções e edições podem ser desfeitas no próprio painel. Importa e exporta arquivos `.excalidrawlib` (versões 1 e 2) — dá para usar bibliotecas baixadas do Excalidraw sem depender do site. A biblioteca fica salva localmente no diretório de dados do usuário
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
+- **Posição e "Ir para"**: o rodapé mostra a posição do cursor na cena (X, Y, as mesmas coordenadas do `.excalidraw`). Clicar nela, ou `Alt+G`, abre "Ir para posição": digite X e Y (ou cole "120, -45" no X) e a tela centraliza nesse ponto, sem mudar o zoom
 - **Conforto**: tema escuro, grade com encaixe, zoom no cursor, salvamento automático (o desenho volta ao reabrir), arrastar arquivo para a janela
 
 ## Baixar
@@ -141,7 +142,7 @@ Pelo `rustdraw mcp`, com `file` (ou um arquivo padrão na linha de comando), a f
 | Estatísticas | `Alt+/` | | Tamanho da fonte | `Ctrl+Shift+<` / `>` |
 | Ajustar à seleção | `Shift+2` / `Shift+3` | | Limpar o canvas | `Ctrl+Delete` |
 | Frame | `F` | | Renomear frame | `Enter` / duplo clique no nome |
-| Encaixar em objetos | `Alt+S` (`Ctrl` inverte ao arrastar) | | | |
+| Encaixar em objetos | `Alt+S` (`Ctrl` inverte ao arrastar) | | Ir para posição (X, Y) | `Alt+G` |
 | Ponteiro laser | `K` | | | |
 
 Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`. O botão direito abre o menu de opções.
