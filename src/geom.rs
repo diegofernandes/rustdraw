@@ -462,6 +462,19 @@ pub fn element_prims(el: &Element) -> Vec<Prim> {
     };
 
     match el.kind.as_str() {
+        "rectangle" if crate::note::is_note(el) => {
+            let outline = crate::note::outline(&b);
+            let (shadow, flap) = crate::note::decorations(&b, bg, opacity);
+            prims.extend(shadow);
+            fill(&mut prims, &outline, &mut rng);
+            prims.extend(flap);
+            push_strokes(
+                &mut prims,
+                rough::linear_path(&outline, true, &o, &mut rng),
+                sw,
+                dash,
+            );
+        }
         "rectangle" => {
             if el.is_round() {
                 let r = corner_radius(el).min(b.width() / 2.0).min(b.height() / 2.0);

@@ -13,6 +13,16 @@ use std::collections::{HashMap, HashSet};
 /// Folga entre o texto e a borda da forma (a mesma do Excalidraw).
 const PADDING: f64 = 5.0;
 
+/// Folga (dos lados, em cima e embaixo) do texto dentro de `c`: as notas
+/// têm mais respiro.
+fn padding(c: &Element) -> (f64, f64) {
+    if crate::note::is_note(c) {
+        crate::note::PADDING
+    } else {
+        (PADDING, PADDING)
+    }
+}
+
 /// Formas que podem conter um rótulo.
 pub fn can_contain(e: &Element) -> bool {
     matches!(e.kind.as_str(), "rectangle" | "ellipse" | "diamond")
@@ -98,14 +108,14 @@ pub fn max_width(c: &Element) -> f64 {
         "diamond" => (w / 2.0).round(),
         _ => w,
     };
-    inner - PADDING * 2.0
+    inner - padding(c).0 * 2.0
 }
 
 /// Altura que a forma `kind` precisa para caber um texto de altura `h`
 /// (`computeContainerDimensionForBoundText` do Excalidraw).
-fn needed_height(kind: &str, h: f64) -> f64 {
-    let d = h.ceil() + PADDING * 2.0;
-    match kind {
+fn needed_height(c: &Element, h: f64) -> f64 {
+    let d = h.ceil() + padding(c).1 * 2.0;
+    match c.kind.as_str() {
         "ellipse" => (d / std::f64::consts::SQRT_2 * 2.0).round(),
         "diamond" => 2.0 * d,
         _ => d,
@@ -149,7 +159,7 @@ pub fn fit(
             changed = true;
         }
         let c = &mut els[c];
-        let need = needed_height(&c.kind, h);
+        let need = needed_height(c, h);
         if c.height >= 0.0 && c.height < need - 0.01 {
             c.height = need;
             c.touch();
@@ -163,8 +173,9 @@ pub fn fit(
 fn placement(t: &Element, c: &Element) -> (f64, f64, f64) {
     let b = geom::local_box(c);
     let (w, h) = (b.width() as f64, b.height() as f64);
-    let room_x = (w / 2.0 - PADDING - t.width / 2.0).max(0.0);
-    let room_y = (h / 2.0 - PADDING - t.height / 2.0).max(0.0);
+    let (px, py) = padding(c);
+    let room_x = (w / 2.0 - px - t.width / 2.0).max(0.0);
+    let room_y = (h / 2.0 - py - t.height / 2.0).max(0.0);
     let dx = match t.text_align() {
         "left" => -room_x,
         "right" => room_x,

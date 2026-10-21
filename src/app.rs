@@ -2506,7 +2506,7 @@ impl App {
         text.frame_id = frame_id;
         label::attach(&mut text, &mut self.elements[ci]);
         if is_note {
-            note::align(&mut text);
+            note::style_text(&mut text);
         }
         // logo acima da forma, para não ficar atrás de quem está por cima dela
         self.elements.insert(ci + 1, text);
