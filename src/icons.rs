@@ -144,11 +144,11 @@ impl Icon {
                  M4.5 19.7 L5.9 18.3",
                 "M6.3 16.4 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0",
             ),
-            // folha com a ponta dobrada e duas linhas escritas
+            // folha com a ponta dobrada (preenchida) e duas linhas escritas
             Icon::Note => (
                 "M3.6 4.3 H20.3 M19.8 3.7 V14.8 M20.1 14.4 L14.5 20.2 M15 19.9 H4.2 M4.1 20.4 V3.9 \
                  M14.4 19.6 V15.6 C14.4 15 14.9 14.5 15.5 14.5 H19.6 M7.6 8.5 H16.3 M7.7 11.8 H12.9",
-                "",
+                "M14.4 14.5 L19.8 14.5 L14.4 20 z",
             ),
             Icon::Menu => ("M4 6.6 H20.2 M3.8 12 H20 M4 17.4 H20.2", ""),
             Icon::Undo => (
