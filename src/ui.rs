@@ -1451,132 +1451,125 @@ fn context_menu(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Altura dos botões nos painéis do rodapé.
+const FOOTER_H: f32 = 32.0;
+
+/// Painel do rodapé (zoom, desfazer, posição, IA, ajuda): todos com a mesma
+/// altura, para ficarem alinhados entre si e com os do canto direito.
+fn footer_panel<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    panel_frame(ui)
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_height(FOOTER_H);
+                ui.spacing_mut().item_spacing.x = 0.0;
+                add(ui)
+            })
+            .inner
+        })
+        .inner
+}
+
 fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
     egui::Area::new(Id::unique("zoom"))
         .anchor(Align2::LEFT_BOTTOM, vec2(12.0, -12.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                panel_frame(ui)
-                    .inner_margin(Margin::same(3))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            if tool_button(ui, false, 32.0, "Diminuir zoom (Ctrl+-)", Icon::ZoomOut)
-                                .clicked()
-                            {
-                                app.zoom_step(view, -1.0);
-                            }
-                            let pct = format!("{:.0}%", app.cam.zoom * 100.0);
-                            if ui
-                                .add(
-                                    egui::Button::new(pct)
-                                        .frame(false)
-                                        .min_size(vec2(52.0, 32.0)),
-                                )
-                                .on_hover_text(keys(
-                                    "Redefinir zoom (Ctrl+0) · Ajustar à tela: Shift+1",
-                                ))
-                                .clicked()
-                            {
-                                app.reset_zoom(view);
-                            }
-                            if tool_button(ui, false, 32.0, "Aumentar zoom (Ctrl++)", Icon::ZoomIn)
-                                .clicked()
-                            {
-                                app.zoom_step(view, 1.0);
-                            }
-                        });
+            // alinhados pelo topo: com a mesma altura, ficam todos na mesma linha
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                footer_panel(ui, |ui| {
+                    if tool_button(ui, false, FOOTER_H, "Diminuir zoom (Ctrl+-)", Icon::ZoomOut)
+                        .clicked()
+                    {
+                        app.zoom_step(view, -1.0);
+                    }
+                    let pct = format!("{:.0}%", app.cam.zoom * 100.0);
+                    if ui
+                        .add(
+                            egui::Button::new(pct)
+                                .frame(false)
+                                .min_size(vec2(52.0, FOOTER_H)),
+                        )
+                        .on_hover_text(keys("Redefinir zoom (Ctrl+0) · Ajustar à tela: Shift+1"))
+                        .clicked()
+                    {
+                        app.reset_zoom(view);
+                    }
+                    if tool_button(ui, false, FOOTER_H, "Aumentar zoom (Ctrl++)", Icon::ZoomIn)
+                        .clicked()
+                    {
+                        app.zoom_step(view, 1.0);
+                    }
+                });
+                footer_panel(ui, |ui| {
+                    ui.add_enabled_ui(app.can_undo(), |ui| {
+                        if tool_button(ui, false, FOOTER_H, "Desfazer (Ctrl+Z)", Icon::Undo)
+                            .clicked()
+                        {
+                            app.undo();
+                        }
                     });
-                panel_frame(ui)
-                    .inner_margin(Margin::same(3))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.add_enabled_ui(app.can_undo(), |ui| {
-                                if tool_button(ui, false, 32.0, "Desfazer (Ctrl+Z)", Icon::Undo)
-                                    .clicked()
-                                {
-                                    app.undo();
-                                }
-                            });
-                            ui.add_enabled_ui(app.can_redo(), |ui| {
-                                if tool_button(
-                                    ui,
-                                    false,
-                                    32.0,
-                                    "Refazer (Ctrl+Shift+Z)",
-                                    Icon::Redo,
-                                )
-                                .clicked()
-                                {
-                                    app.redo();
-                                }
-                            });
-                        });
+                    ui.add_enabled_ui(app.can_redo(), |ui| {
+                        if tool_button(ui, false, FOOTER_H, "Refazer (Ctrl+Shift+Z)", Icon::Redo)
+                            .clicked()
+                        {
+                            app.redo();
+                        }
                     });
+                });
                 // posição do ponteiro na cena; clicar abre o "Ir para posição"
                 let p = app.cam.w(app.cursor.unwrap_or(view.center()));
-                panel_frame(ui)
-                    .inner_margin(Margin::same(3))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let text = format!("X {:.0}   Y {:.0}", p.x, p.y);
-                            let font = FontId::monospace(12.0);
-                            let text_w = ui
-                                .painter()
-                                .layout_no_wrap(text.clone(), font.clone(), Color32::WHITE)
-                                .size()
-                                .x;
-                            let (rect, resp) = ui.allocate_exact_size(
-                                vec2((text_w + 46.0).max(150.0), 32.0),
-                                Sense::click(),
-                            );
-                            let open = app.goto.is_some();
-                            let bg = if open {
-                                accent_bg(ui)
-                            } else if resp.hovered() {
-                                hover_bg(ui)
-                            } else {
-                                Color32::TRANSPARENT
-                            };
-                            let col = if open { accent_fg(ui) } else { fg(ui) };
-                            let y = rect.center().y;
-                            let painter = ui.painter();
-                            painter.rect_filled(rect, 7.0, bg);
-                            let r = Rect::from_center_size(
-                                pos2(rect.left() + 17.0, y),
-                                vec2(18.0, 18.0),
-                            );
-                            icons::paint(painter, r, Icon::Position, col);
-                            painter.text(
-                                pos2(rect.left() + 34.0, y),
-                                Align2::LEFT_CENTER,
-                                text,
-                                font,
-                                col,
-                            );
-                            if resp
-                                .on_hover_text(keys("Posição do cursor · Ir para posição (Alt+G)"))
-                                .clicked()
-                            {
-                                app.toggle_goto(view);
-                            }
-                        });
-                    });
+                footer_panel(ui, |ui| {
+                    let text = format!("X {:.0}   Y {:.0}", p.x, p.y);
+                    let font = FontId::monospace(12.0);
+                    let text_w = ui
+                        .painter()
+                        .layout_no_wrap(text.clone(), font.clone(), Color32::WHITE)
+                        .size()
+                        .x;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        vec2((text_w + 46.0).max(150.0), FOOTER_H),
+                        Sense::click(),
+                    );
+                    let open = app.goto.is_some();
+                    let bg = if open {
+                        accent_bg(ui)
+                    } else if resp.hovered() {
+                        hover_bg(ui)
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let col = if open { accent_fg(ui) } else { fg(ui) };
+                    let y = rect.center().y;
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 7.0, bg);
+                    let r = Rect::from_center_size(pos2(rect.left() + 17.0, y), vec2(18.0, 18.0));
+                    icons::paint(painter, r, Icon::Position, col);
+                    painter.text(
+                        pos2(rect.left() + 34.0, y),
+                        Align2::LEFT_CENTER,
+                        text,
+                        font,
+                        col,
+                    );
+                    if resp
+                        .on_hover_text(keys("Posição do cursor · Ir para posição (Alt+G)"))
+                        .clicked()
+                    {
+                        app.toggle_goto(view);
+                    }
+                });
             });
         });
     egui::Area::new(Id::unique("help_btn"))
         .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -12.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            panel_frame(ui)
-                .inner_margin(Margin::same(3))
-                .show(ui, |ui| {
-                    if tool_button(ui, app.show_help, 32.0, "Atalhos (?)", Icon::Help).clicked() {
-                        app.show_help = !app.show_help;
-                    }
-                });
+            footer_panel(ui, |ui| {
+                if tool_button(ui, app.show_help, FOOTER_H, "Atalhos (?)", Icon::Help).clicked() {
+                    app.show_help = !app.show_help;
+                }
+            });
         });
 }
 
@@ -2186,36 +2179,33 @@ fn live_chip(app: &mut App, ctx: &egui::Context) {
         .anchor(Align2::RIGHT_BOTTOM, vec2(-60.0, -12.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            panel_frame(ui)
-                .inner_margin(Margin::same(3))
-                .show(ui, |ui| {
-                    let dot = if waiting {
-                        Color32::from_rgb(240, 140, 0)
+            footer_panel(ui, |ui| {
+                let dot = if waiting {
+                    Color32::from_rgb(240, 140, 0)
+                } else {
+                    Color32::from_rgb(47, 158, 68)
+                };
+                ui.add_space(6.0);
+                let (r, _) = ui.allocate_exact_size(vec2(8.0, FOOTER_H), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, dot);
+                ui.add_space(4.0);
+                let text = RichText::new(format!("IA  127.0.0.1:{port}"));
+                if ui
+                    .add(
+                        egui::Button::new(text)
+                            .frame(false)
+                            .min_size(vec2(0.0, FOOTER_H)),
+                    )
+                    .on_hover_text(if waiting {
+                        "Um assistente está esperando sua permissão"
                     } else {
-                        Color32::from_rgb(47, 158, 68)
-                    };
-                    ui.horizontal(|ui| {
-                        ui.add_space(6.0);
-                        let (r, _) = ui.allocate_exact_size(vec2(8.0, 30.0), Sense::hover());
-                        ui.painter().circle_filled(r.center(), 4.0, dot);
-                        let text = RichText::new(format!("IA  127.0.0.1:{port}"));
-                        if ui
-                            .add(
-                                egui::Button::new(text)
-                                    .frame(false)
-                                    .min_size(vec2(0.0, 30.0)),
-                            )
-                            .on_hover_text(if waiting {
-                                "Um assistente está esperando sua permissão"
-                            } else {
-                                "Edição por IA ligada: ver conexões e pedidos"
-                            })
-                            .clicked()
-                        {
-                            app.show_live = !app.show_live;
-                        }
-                    });
-                });
+                        "Edição por IA ligada: ver conexões e pedidos"
+                    })
+                    .clicked()
+                {
+                    app.show_live = !app.show_live;
+                }
+            });
         });
 }
 
