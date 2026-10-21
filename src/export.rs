@@ -292,6 +292,11 @@ fn paint_for(c: Rgba) -> Paint<'static> {
     p
 }
 
+/// Maior lado (px) do bloco onde um texto é rasterizado antes de ser composto.
+const MAX_TEXT_BLOCK: f32 = 8192.0;
+/// Maior tamanho (px) em que um caractere é rasterizado.
+const MAX_GLYPH_PX: f32 = 2048.0;
+
 fn draw_prim(
     pm: &mut Pixmap,
     prim: &Prim,
@@ -366,12 +371,27 @@ fn draw_prim(
         } => {
             let fam = Family::from_excalidraw(*family);
             let rf = fonts::raster_fonts();
-            let px = size * s;
-            let lh = size * line_height * s;
             let lines: Vec<&str> = text.split('\n').collect();
-            let widths: Vec<f32> = lines.iter().map(|l| rf.line_width(fam, l, px)).collect();
-            let block_w = widths.iter().cloned().fold(width * s, f32::max).ceil() + 4.0;
-            let block_h = (lh * lines.len() as f32).ceil() + 4.0;
+            // o bloco é rasterizado na escala `s`, a não ser que fique grande
+            // demais (um fontSize de 100000 pediria 150 GB): aí é rasterizado
+            // menor e ampliado ao compor
+            let block = |s: f32| {
+                let widths: Vec<f32> = lines
+                    .iter()
+                    .map(|l| rf.line_width(fam, l, size * s))
+                    .collect();
+                let w = widths.iter().cloned().fold(width * s, f32::max).ceil() + 4.0;
+                let h = (size * line_height * s * lines.len() as f32).ceil() + 4.0;
+                (widths, w, h)
+            };
+            let (_, w, h) = block(s);
+            let k = (MAX_TEXT_BLOCK / w)
+                .min(MAX_TEXT_BLOCK / h)
+                .min(MAX_GLYPH_PX / (size * s))
+                .min(1.0);
+            let s = s * k;
+            let (widths, block_w, block_h) = block(s);
+            let (px, lh) = (size * s, size * line_height * s);
             let Some(mut tmp) = Pixmap::new(block_w as u32, block_h as u32) else {
                 return;
             };
@@ -735,6 +755,33 @@ mod tests {
         assert_eq!(&png[1..4], b"PNG");
         let svg = render_svg(&els, &ExportOpts::default()).unwrap();
         assert!(svg.contains("<path") && svg.contains("Olá") && svg.contains("@font-face"));
+    }
+
+    #[test]
+    fn huge_text_is_drawn_without_running_out_of_memory() {
+        // antes: o bloco de um texto com fontSize 100000 pedia 150 GB
+        let text = |size: f64| {
+            let mut els = vec![];
+            let spec = serde_json::json!({"type": "text", "text": "oi", "fontSize": size});
+            crate::edit::add(&mut els, &mut Map::new(), &[spec]).unwrap();
+            els
+        };
+        let opts = |scale| ExportOpts {
+            scale,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut huge = text(100000.0);
+        (huge[0].width, huge[0].height) = (100.0, 50.0);
+        assert!(render_pixmap(&huge, &opts(1.0)).is_ok());
+        // acima do limite por caractere: rasterizado menor e ampliado, mas aparece
+        let big = text(8000.0);
+        let pm = render_pixmap(&big, &opts(0.3)).unwrap();
+        let dark = pm.pixels().iter().filter(|p| p.red() < 128).count();
+        assert!(
+            dark > pm.pixels().len() / 50,
+            "o texto foi desenhado ({dark} px)"
+        );
     }
 
     #[test]
