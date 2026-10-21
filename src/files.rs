@@ -4,32 +4,51 @@
 //! com `mimeType` e o conteúdo inteiro num `dataURL` base64) e o elemento
 //! `image` só aponta para ela pelo `fileId`. Assim o arquivo continua um único
 //! JSON, que abre no excalidraw.com e funciona sem internet.
+//!
+//! SVG fica guardado como SVG (vetorial no arquivo) e é rasterizado com o
+//! resvg só para desenhar.
 
 use crate::fonts;
 use crate::model::{Element, Style, now_ms};
 use image::{ImageFormat, RgbaImage};
 use serde_json::{Map, Value, json};
 use std::io::Cursor;
+use std::sync::OnceLock;
 
 /// Lado máximo de uma imagem inserida; maiores são reduzidas (como o Excalidraw faz).
 pub const MAX_SIDE: u32 = 1440;
 
 /// Formatos que sabemos decodificar.
 pub fn mime_of(bytes: &[u8]) -> Option<&'static str> {
+    if is_svg(bytes) {
+        return Some("image/svg+xml");
+    }
     Some(match image::guess_format(bytes).ok()? {
         ImageFormat::Png => "image/png",
         ImageFormat::Jpeg => "image/jpeg",
         ImageFormat::Gif => "image/gif",
         ImageFormat::WebP => "image/webp",
+        ImageFormat::Bmp => "image/bmp",
+        ImageFormat::Ico => "image/x-icon",
         _ => return None,
     })
+}
+
+/// SVG não tem assinatura fixa: procura a tag `<svg` no começo do arquivo.
+fn is_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(4096)];
+    let text = String::from_utf8_lossy(head);
+    text.trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
+        && text.contains("<svg")
 }
 
 pub fn is_image_path(p: &std::path::Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp"
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico"
         )
     })
 }
@@ -131,7 +150,90 @@ pub fn sha1_hex(data: &[u8]) -> String {
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Option<RgbaImage> {
+    if is_svg(bytes) {
+        return svg_raster(bytes);
+    }
     image::load_from_memory(bytes).ok().map(|i| i.to_rgba8())
+}
+
+/// Opções do resvg: fontes embutidas e as do sistema (nada da rede), e sem
+/// ler arquivos do disco por `<image href="...">` (só imagens embutidas).
+fn svg_options() -> &'static resvg::usvg::Options<'static> {
+    static CELL: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let mut opt = resvg::usvg::Options::default();
+        opt.image_href_resolver.resolve_string = Box::new(|_, _| None);
+        let db = opt.fontdb_mut();
+        db.load_system_fonts();
+        if let Some(v) = fonts::virgil_ttf() {
+            db.load_font_data(v.to_vec());
+        }
+        db.load_font_data(fonts::mono_ttf().to_vec());
+        let before = db.len();
+        db.load_font_data(fonts::sans_ttf().to_vec());
+        // texto sem fonte conhecida sai na fonte normal do app
+        let sans = db
+            .faces()
+            .nth(before)
+            .and_then(|f| f.families.first().cloned());
+        if let Some((name, _)) = sans {
+            db.set_sans_serif_family(name.clone());
+            opt.font_family = name;
+        }
+        opt
+    })
+}
+
+fn svg_tree(bytes: &[u8]) -> Option<resvg::usvg::Tree> {
+    resvg::usvg::Tree::from_data(bytes, svg_options()).ok()
+}
+
+/// Tamanho natural de um SVG (o `width`/`height` ou o `viewBox`).
+fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let s = svg_tree(bytes)?.size();
+    Some((
+        s.width().round().max(1.0) as u32,
+        s.height().round().max(1.0) as u32,
+    ))
+}
+
+/// Rasteriza um SVG com folga para o zoom: ícones pequenos ganham resolução
+/// (lado maior de pelo menos 512 px), mas sem passar de 2048 px.
+fn svg_raster(bytes: &[u8]) -> Option<RgbaImage> {
+    let tree = svg_tree(bytes)?;
+    let size = tree.size();
+    let long = size.width().max(size.height());
+    let k = (long * 2.0).clamp(512.0, 2048.0) / long;
+    let w = (size.width() * k).round().max(1.0) as u32;
+    let h = (size.height() * k).round().max(1.0) as u32;
+    let mut pm = tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(w as f32 / size.width(), h as f32 / size.height()),
+        &mut pm.as_mut(),
+    );
+    let mut data = pm.take();
+    // o resvg devolve RGBA pré-multiplicado
+    for px in data.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a != 0 && a != 255 {
+            for c in &mut px[..3] {
+                *c = (*c as u32 * 255 / a).min(255) as u8;
+            }
+        }
+    }
+    RgbaImage::from_raw(w, h, data)
+}
+
+/// Tamanho natural da imagem de uma entrada de `files` (para SVG, o do
+/// próprio SVG, não o da rasterização).
+pub fn natural_size(files: &Map<String, Value>, id: &str) -> Option<(u32, u32)> {
+    let url = files.get(id)?.get("dataURL")?.as_str()?;
+    let bytes = parse_data_url(url)?;
+    if is_svg(&bytes) {
+        return svg_size(&bytes);
+    }
+    decode_bytes(&bytes).map(|i| i.dimensions())
 }
 
 /// Decodifica a imagem de uma entrada de `files`.
@@ -156,8 +258,22 @@ pub struct Added {
 
 /// Guarda a imagem em `files` (reduzindo se passar de [`MAX_SIDE`]) e devolve o `fileId`.
 pub fn add_bytes(files: &mut Map<String, Value>, bytes: &[u8]) -> Result<Added, String> {
-    let mime =
-        mime_of(bytes).ok_or("formato de imagem não suportado (use PNG, JPG, GIF ou WebP)")?;
+    let mime = mime_of(bytes)
+        .ok_or("formato de imagem não suportado (use PNG, JPG, GIF, WebP, SVG ou BMP)")?;
+    if mime == "image/svg+xml" {
+        // fica vetorial no arquivo; só o tamanho na tela é limitado
+        let (w, h) = svg_size(bytes).ok_or("SVG inválido")?;
+        let k = (MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
+        let (w, h) = (
+            ((w as f64 * k).round() as u32).max(1),
+            ((h as f64 * k).round() as u32).max(1),
+        );
+        return Ok(Added {
+            id: insert(files, mime, bytes),
+            width: w,
+            height: h,
+        });
+    }
     let img = image::load_from_memory(bytes).map_err(|e| format!("imagem inválida: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -183,7 +299,16 @@ pub fn add_bytes(files: &mut Map<String, Value>, bytes: &[u8]) -> Result<Added, 
     } else {
         (mime, bytes.to_vec(), w, h)
     };
-    let id = sha1_hex(&bytes);
+    Ok(Added {
+        id: insert(files, mime, &bytes),
+        width: w,
+        height: h,
+    })
+}
+
+/// Põe os bytes em `files` (uma vez só por conteúdo) e devolve o `fileId`.
+fn insert(files: &mut Map<String, Value>, mime: &str, bytes: &[u8]) -> String {
+    let id = sha1_hex(bytes);
     if !files.contains_key(&id) {
         let now = now_ms();
         files.insert(
@@ -191,17 +316,13 @@ pub fn add_bytes(files: &mut Map<String, Value>, bytes: &[u8]) -> Result<Added, 
             json!({
                 "mimeType": mime,
                 "id": id,
-                "dataURL": data_url(mime, &bytes),
+                "dataURL": data_url(mime, bytes),
                 "created": now,
                 "lastRetrieved": now,
             }),
         );
     }
-    Ok(Added {
-        id,
-        width: w,
-        height: h,
-    })
+    id
 }
 
 /// Elemento `image` com o centro em (cx, cy), lado maior limitado a `max_side`.
@@ -274,5 +395,60 @@ mod tests {
         let el = image_element(&a, 100.0, 100.0, 1000.0);
         assert_eq!((el.x, el.y, el.width, el.height), (98.0, 99.0, 4.0, 2.0));
         assert_eq!(subset(&files, &[el]).len(), 1);
+    }
+
+    const SVG: &[u8] = br##"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">
+  <rect width="20" height="20" fill="#0000ff"/>
+</svg>"##;
+
+    #[test]
+    fn svg_stays_vector_and_draws() {
+        let mut files = Map::new();
+        let a = add_bytes(&mut files, SVG).unwrap();
+        assert_eq!((a.width, a.height), (40, 20));
+        assert_eq!(files[&a.id]["mimeType"], "image/svg+xml");
+        assert_eq!(
+            parse_data_url(files[&a.id]["dataURL"].as_str().unwrap()).unwrap(),
+            SVG
+        );
+        assert_eq!(natural_size(&files, &a.id), Some((40, 20)));
+        // rasterizado com folga para o zoom, na proporção do SVG
+        let img = decode(&files, &a.id).unwrap();
+        assert_eq!(img.dimensions(), (512, 256));
+        assert_eq!(img.get_pixel(10, 100).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(500, 100).0[3], 0);
+    }
+
+    #[test]
+    fn svg_from_excalidraw_and_bmp_decode() {
+        // como o excalidraw.com guarda um SVG colado
+        let mut files = Map::new();
+        files.insert(
+            "x".into(),
+            json!({"mimeType": "image/svg+xml", "id": "x", "dataURL": data_url("image/svg+xml", SVG)}),
+        );
+        assert!(decode(&files, "x").is_some());
+        let mut bmp = Vec::new();
+        RgbaImage::from_pixel(3, 2, image::Rgba([0, 255, 0, 255]))
+            .write_to(&mut Cursor::new(&mut bmp), ImageFormat::Bmp)
+            .unwrap();
+        assert_eq!(mime_of(&bmp), Some("image/bmp"));
+        let a = add_bytes(&mut files, &bmp).unwrap();
+        assert_eq!(decode(&files, &a.id).unwrap().dimensions(), (3, 2));
+    }
+
+    #[test]
+    fn svg_does_not_read_local_files() {
+        let dir = std::env::temp_dir().join(format!("rustdraw-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("secret.png");
+        std::fs::write(&p, png(4, 4)).unwrap();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="4" height="4"><image width="4" height="4" xlink:href="{}"/></svg>"#,
+            p.display()
+        );
+        let img = decode_bytes(svg.as_bytes()).unwrap();
+        assert!(img.pixels().all(|p| p.0[3] == 0));
     }
 }

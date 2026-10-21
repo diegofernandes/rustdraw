@@ -430,7 +430,7 @@ fn element_schema(creating: bool) -> Value {
         }},
         "type": {"type": "string", "enum": ["rectangle", "note", "diamond", "ellipse", "text", "line", "arrow", "freedraw", "image"],
                  "description": "note = nota adesiva: papel amarelo sem borda, com sombra e a ponta dobrada, 200×200 por padrão; o texto vai em `label` e fica em cima à esquerda, quebrando na largura da nota. No arquivo é um retângulo comum."},
-        "path": {"type": "string", "description": "Imagem: caminho de um PNG, JPG, GIF ou WebP no disco; é embutido no arquivo. Sem width/height usa o tamanho da imagem (até 1440 px); com um só deles mantém a proporção."},
+        "path": {"type": "string", "description": "Imagem: caminho de um PNG, JPG, GIF, WebP, SVG ou BMP no disco; é embutido no arquivo. Sem width/height usa o tamanho da imagem (até 1440 px); com um só deles mantém a proporção."},
         "fileId": {"type": "string", "description": "Imagem: reaproveita uma imagem que já está na cena (em vez de `path`)."},
         "x": {"type": "number", "description": "Canto superior esquerdo (texto: ponto de ancoragem conforme textAlign; linhas: origem de `points`)."},
         "y": {"type": "number"},
