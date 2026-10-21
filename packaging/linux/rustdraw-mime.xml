@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.excalidraw+json">
+    <comment>Excalidraw drawing</comment>
+    <comment xml:lang="pt_BR">Desenho .excalidraw</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.excalidraw"/>
+  </mime-type>
+  <mime-type type="application/vnd.excalidrawlib+json">
+    <comment>Excalidraw library</comment>
+    <comment xml:lang="pt_BR">Biblioteca .excalidrawlib</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.excalidrawlib"/>
+  </mime-type>
+</mime-info>

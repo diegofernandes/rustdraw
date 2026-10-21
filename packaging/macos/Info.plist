@@ -6,6 +6,33 @@
 	<string>pt-BR</string>
 	<key>CFBundleDisplayName</key>
 	<string>RustDraw</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Desenho Excalidraw</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.github.diegofernandes.rustdraw.excalidraw</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Biblioteca Excalidraw</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.github.diegofernandes.rustdraw.excalidrawlib</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>rustdraw</string>
 	<key>CFBundleIconFile</key>
@@ -26,6 +53,51 @@
 	<string>public.app-category.graphics-design</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.github.diegofernandes.rustdraw.excalidraw</string>
+			<key>UTTypeDescription</key>
+			<string>Desenho Excalidraw</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>excalidraw</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.excalidraw+json</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.github.diegofernandes.rustdraw.excalidrawlib</string>
+			<key>UTTypeDescription</key>
+			<string>Biblioteca Excalidraw</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>excalidrawlib</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.excalidrawlib+json</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
