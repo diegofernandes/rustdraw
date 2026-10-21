@@ -167,8 +167,22 @@ fn menu_row(
     shortcut: &str,
     on: Option<bool>,
 ) -> Response {
+    menu_row_with(ui, icon, label, shortcut, on, 30.0, None)
+}
+
+/// `menu_row` com altura e cor do texto e do ícone escolhidas (o menu do
+/// botão direito é mais baixo e pinta "Apagar" de vermelho).
+fn menu_row_with(
+    ui: &mut Ui,
+    icon: Option<Icon>,
+    label: &str,
+    shortcut: &str,
+    on: Option<bool>,
+    height: f32,
+    tint: Option<Color32>,
+) -> Response {
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, height), Sense::click());
     let checked = on == Some(true);
     resp.widget_info(|| match on {
         Some(v) => egui::WidgetInfo::selected(egui::Role::CheckBox, true, v, label),
@@ -184,6 +198,7 @@ fn menu_row(
     let p = ui.painter();
     p.rect_filled(rect, 7.0, bg);
     let col = if checked { accent_fg(ui) } else { fg(ui) };
+    let col = tint.unwrap_or(col);
     let y = rect.center().y;
     if let Some(icon) = icon {
         let r = Rect::from_center_size(pos2(rect.left() + 17.0, y), vec2(18.0, 18.0));
@@ -889,9 +904,7 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                             app.delete_selected();
                         }
                         if app.selected.len() > 1
-                            && ui
-                                .small_button("Agrupar")
-                                .on_hover_text(keys("Ctrl+G"))
+                            && tool_button(ui, false, 32.0, "Agrupar (Ctrl+G)", Icon::Group)
                                 .clicked()
                         {
                             app.group_selected(true);
@@ -901,10 +914,14 @@ fn props_panel(app: &mut App, ctx: &egui::Context) {
                             .iter()
                             .any(|e| !e.group_ids.is_empty());
                         if grouped
-                            && ui
-                                .small_button("Desagrupar")
-                                .on_hover_text(keys("Ctrl+Shift+G"))
-                                .clicked()
+                            && tool_button(
+                                ui,
+                                false,
+                                32.0,
+                                "Desagrupar (Ctrl+Shift+G)",
+                                Icon::Ungroup,
+                            )
+                            .clicked()
                         {
                             app.group_selected(false);
                         }
@@ -1032,7 +1049,7 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 if item(ui, Some(Icon::Save), "Salvar", "Ctrl+S") {
                     app.save();
                 }
-                if item(ui, None, "Salvar como…", "Ctrl+Shift+S") {
+                if item(ui, Some(Icon::SaveAs), "Salvar como…", "Ctrl+Shift+S") {
                     app.save_as();
                 }
                 if item(
@@ -1044,7 +1061,7 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                     app.show_export = true;
                 }
                 ui.separator();
-                if item(ui, None, "Novo desenho", "") {
+                if item(ui, Some(Icon::NewFile), "Novo desenho", "") {
                     app.new_scene();
                 }
                 if item(ui, Some(Icon::Delete), "Limpar o canvas", "Ctrl+Delete")
@@ -1068,26 +1085,50 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 if toggle(ui, Some(Icon::Grid), "Grade", "Ctrl+'", app.grid) {
                     app.toggle_grid();
                 }
-                if toggle(ui, None, "Encaixar em objetos", "Alt+S", app.snap) {
+                if toggle(
+                    ui,
+                    Some(Icon::Snap),
+                    "Encaixar em objetos",
+                    "Alt+S",
+                    app.snap,
+                ) {
                     app.toggle_snap();
                 }
-                if toggle(ui, None, "Modo zen", "Alt+Z", app.zen_mode) {
+                if toggle(ui, Some(Icon::Zen), "Modo zen", "Alt+Z", app.zen_mode) {
                     app.zen_mode = !app.zen_mode;
                 }
-                if toggle(ui, None, "Modo de visualização", "Alt+R", app.view_mode) {
+                if toggle(
+                    ui,
+                    Some(Icon::ViewMode),
+                    "Modo de visualização",
+                    "Alt+R",
+                    app.view_mode,
+                ) {
                     app.toggle_view_mode();
                 }
-                if toggle(ui, None, "Estatísticas", "Alt+/", app.show_stats) {
+                if toggle(
+                    ui,
+                    Some(Icon::Stats),
+                    "Estatísticas",
+                    "Alt+/",
+                    app.show_stats,
+                ) {
                     app.show_stats = !app.show_stats;
                 }
                 let live = app.live.is_some();
-                if menu_row(ui, None, "Permitir edição por IA (MCP)", "", Some(live))
-                    .on_hover_text(
-                        "Deixa um assistente de IA ligado ao `rustdraw mcp` editar este \
-                         desenho enquanto o editor está aberto. Só aceita conexões deste \
-                         computador.",
-                    )
-                    .clicked()
+                if menu_row(
+                    ui,
+                    Some(Icon::Mcp),
+                    "Permitir edição por IA (MCP)",
+                    "",
+                    Some(live),
+                )
+                .on_hover_text(
+                    "Deixa um assistente de IA ligado ao `rustdraw mcp` editar este \
+                     desenho enquanto o editor está aberto. Só aceita conexões deste \
+                     computador.",
+                )
+                .clicked()
                 {
                     app.set_live(!live);
                 }
@@ -1277,6 +1318,42 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
     out
 }
 
+/// Ícone do design para cada item do menu do botão direito.
+fn act_icon(app: &App, act: Act) -> Icon {
+    match act {
+        Act::Cut => Icon::Cut,
+        Act::Copy => Icon::Copy,
+        Act::Paste => Icon::Paste,
+        Act::CopyPng => Icon::ExportPng,
+        Act::CopySvg => Icon::ExportSvg,
+        Act::CopyText => Icon::Text,
+        Act::SelectAll => Icon::SelectAll,
+        Act::UnlockAll => Icon::Lock(false),
+        Act::AddToLibrary => Icon::AddToLibrary,
+        Act::Grid => Icon::Grid,
+        Act::Snap => Icon::Snap,
+        Act::Zen => Icon::Zen,
+        Act::ViewMode => Icon::ViewMode,
+        Act::Stats => Icon::Stats,
+        Act::CopyStyles => Icon::CopyStyles,
+        Act::PasteStyles => Icon::PasteStyles,
+        Act::Group => Icon::Group,
+        Act::Ungroup => Icon::Ungroup,
+        Act::SendBackward => Icon::SendBackward,
+        Act::BringForward => Icon::BringForward,
+        Act::SendToBack => Icon::SendToBack,
+        Act::BringToFront => Icon::BringToFront,
+        Act::FlipH => Icon::FlipH,
+        Act::FlipV => Icon::FlipV,
+        Act::Duplicate => Icon::Duplicate,
+        // a trava como fica depois do clique
+        Act::Lock => Icon::Lock(!app.selection_locked()),
+        Act::Delete => Icon::Delete,
+        Act::ExportFrame => Icon::ExportFrame,
+        Act::RenameFrame => Icon::Frame,
+    }
+}
+
 fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
     match act {
         Act::Cut => app.cut_selection(ctx),
@@ -1342,21 +1419,9 @@ fn context_menu(app: &mut App, ctx: &egui::Context) {
                             ui.add_space(3.0);
                         }
                         Entry::Item(label, shortcut, act, checked) => {
-                            let text = match checked {
-                                Some(true) => RichText::new(format!("✔ {label}")),
-                                _ => RichText::new(label),
-                            };
-                            let text = if matches!(act, Act::Delete) {
-                                text.color(danger)
-                            } else {
-                                text
-                            };
-                            let r = ui.add(
-                                egui::Button::new(text)
-                                    .shortcut_text(keys(shortcut))
-                                    .frame(false)
-                                    .min_size(vec2(250.0, 26.0)),
-                            );
+                            let tint = matches!(act, Act::Delete).then_some(danger);
+                            let icon = Some(act_icon(app, act));
+                            let r = menu_row_with(ui, icon, label, shortcut, checked, 26.0, tint);
                             if r.clicked() {
                                 chosen = Some(act);
                             }
