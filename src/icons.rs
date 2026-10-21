@@ -47,6 +47,25 @@ pub enum Icon {
     Delete,
     Library,
     Help,
+    SaveAs,
+    NewFile,
+    ExportFrame,
+    Cut,
+    Copy,
+    Paste,
+    CopyStyles,
+    PasteStyles,
+    Snap,
+    Zen,
+    ViewMode,
+    Stats,
+    Group,
+    Ungroup,
+    FlipH,
+    FlipV,
+    SelectAll,
+    AddToLibrary,
+    Mcp,
 }
 
 impl Icon {
@@ -223,6 +242,115 @@ impl Icon {
                  M9.6 9.6 C9.6 8.2 10.7 7.2 12 7.2 C13.3 7.2 14.4 8.2 14.4 9.4 \
                  C14.4 11.4 12 11.6 12 13.6",
                 "M10.9 16.6 a1.1 1.1 0 1 0 2.2 0 a1.1 1.1 0 1 0 -2.2 0",
+            ),
+            // disquete com um lápis no canto
+            Icon::SaveAs => (
+                "M3.9 4.4 H14.3 L17.6 7.7 V10.6 M4 4 V18.6 H10.4 M7.2 4.6 V8.2 H13.2 V4.8 \
+                 M18.6 12.3 L20.9 14.6 L14.6 20.9 L12 21.2 L12.3 18.6 L18.8 12.1",
+                "",
+            ),
+            Icon::NewFile => (
+                "M13.6 3.6 H5.6 V20.4 H18.4 V8.4 L13.4 3.4 M13.6 3.8 V8.4 H18.2 M12 11.6 V17.4 \
+                 M9.1 14.5 H14.9",
+                "",
+            ),
+            // a cerquilha do frame com a seta de exportar
+            Icon::ExportFrame => (
+                "M6.4 8.6 V20.8 M13.2 8.8 V20.6 M3.2 11.6 H16.4 M3.4 17.8 H16.2 \
+                 M14.6 3.8 H20.4 V9.6 M20.2 4 L15.2 9",
+                "",
+            ),
+            Icon::Cut => (
+                "M4.2 17.4 a2.8 2.8 0 1 0 5.6 0 a2.8 2.8 0 1 0 -5.6 0 \
+                 M14.2 17.4 a2.8 2.8 0 1 0 5.6 0 a2.8 2.8 0 1 0 -5.6 0 \
+                 M8.8 15.2 L17.4 3.6 M15.2 15.2 L6.6 3.6",
+                "",
+            ),
+            Icon::Copy => (
+                "M9 8.2 H18.6 C19.4 8.2 20 8.8 20 9.6 V19.2 C20 20 19.4 20.6 18.6 20.6 H9 \
+                 C8.2 20.6 7.6 20 7.6 19.2 V9.6 C7.6 8.8 8.2 8.2 9 8.2 M16.2 5.2 V4.8 \
+                 C16.2 4 15.6 3.4 14.8 3.4 H5.2 C4.4 3.4 3.8 4 3.8 4.8 V14.4 \
+                 C3.8 15.2 4.4 15.8 5.2 15.8 H5.4",
+                "",
+            ),
+            Icon::Paste => (
+                "M8.6 5 H6.2 C5.4 5 4.8 5.6 4.8 6.4 V19.6 C4.8 20.4 5.4 21 6.2 21 H17.8 \
+                 C18.6 21 19.2 20.4 19.2 19.6 V6.4 C19.2 5.6 18.6 5 17.8 5 H15.4 \
+                 M9 3.2 H15 V6.8 H9 Z M8.6 11.4 H15.4 M8.6 15.4 H13",
+                "",
+            ),
+            // conta-gotas pega o estilo; o rolo de pintura aplica
+            Icon::CopyStyles => (
+                "M14.6 9.4 L5.6 18.4 L5.2 20.8 L7.6 20.4 L16.6 11.4 M13.2 8 L18 12.8 \
+                 M15.4 10.2 L18.6 7 C19.6 6 19.6 4.4 18.6 3.4 C17.6 2.4 16 2.4 15 3.4 L11.8 6.6",
+                "",
+            ),
+            Icon::PasteStyles => (
+                "M5 4.4 H17.4 V9.2 H5 Z M17.4 6.8 H20 V12.2 H12 V15 M10.8 15 H13.2 V20.6 H10.8 Z",
+                "",
+            ),
+            // ímã
+            Icon::Snap => (
+                "M5.4 4.4 V11.6 C5.4 15.4 8.4 18.4 12.2 18.4 C16 18.4 19 15.4 19 11.6 V4.4 \
+                 M5.2 4.2 H9.6 V11.4 C9.6 12.8 10.8 14 12.2 14 C13.6 14 14.8 12.8 14.8 11.4 \
+                 V4.2 H19.2 M5.4 7.8 H9.6 M14.8 7.8 H19 M10.4 21 H14",
+                "",
+            ),
+            // círculo aberto (ensō) com um ponto no meio
+            Icon::Zen => (
+                "M15.8 4.6 C19.4 6.2 21 10.2 19.8 14 C18.6 17.8 14.8 20.2 10.8 19.6 \
+                 C6.8 19 3.8 15.6 3.8 11.6 C3.8 7.8 6.6 4.6 10.2 4",
+                "M10.6 12 a1.4 1.4 0 1 0 2.8 0 a1.4 1.4 0 1 0 -2.8 0",
+            ),
+            Icon::ViewMode => (
+                "M2.8 12.2 C5 7.8 8.4 5.6 12 5.6 C15.6 5.6 19 7.8 21.2 12 \
+                 C19 16.2 15.6 18.4 12 18.4 C8.4 18.4 5 16.2 2.9 11.6 \
+                 M9.2 12 a2.8 2.8 0 1 0 5.6 0 a2.8 2.8 0 1 0 -5.6 0",
+                "",
+            ),
+            Icon::Stats => (
+                "M5.4 19.6 V13 H8.6 V19.6 M10.4 19.6 V5.6 H13.6 V19.6 M15.4 19.6 V9.6 H18.6 V19.6 \
+                 M3.4 19.8 H20.8",
+                "",
+            ),
+            // caixa de seleção com as alças nos cantos
+            Icon::Group => (
+                "M6.4 4 H17.6 M20 6.4 V17.6 M17.6 20 H6.4 M4 17.6 V6.4 \
+                 M7.6 7.6 H12.4 V12.4 H7.6 Z M11.6 14.2 a2.6 2.6 0 1 0 5.2 0 a2.6 2.6 0 1 0 -5.2 0",
+                "M2.6 2.6 h2.8 v2.8 h-2.8 z M18.6 2.6 h2.8 v2.8 h-2.8 z \
+                 M18.6 18.6 h2.8 v2.8 h-2.8 z M2.6 18.6 h2.8 v2.8 h-2.8 z",
+            ),
+            Icon::Ungroup => (
+                "M4 9.2 V4 H9.2 M20 14.8 V20 H14.8 M6.6 6.6 H11.8 V11.8 H6.6 Z \
+                 M12.4 15 a2.6 2.6 0 1 0 5.2 0 a2.6 2.6 0 1 0 -5.2 0",
+                "",
+            ),
+            // triângulo e o reflexo dele, preenchido, do outro lado do eixo
+            Icon::FlipH => (
+                "M12 3.4 V5.4 M12 8 V10 M12 12.6 V14.6 M12 17.2 V19.2 M9.4 6.4 L3.4 17.6 H9.4 Z",
+                "M14.6 6.4 L20.6 17.6 L14.6 17.6 z",
+            ),
+            Icon::FlipV => (
+                "M3.4 12 H5.4 M8 12 H10 M12.6 12 H14.6 M17.2 12 H19.2 M6.4 9.4 L17.6 3.4 V9.4 Z",
+                "M6.4 14.6 L17.6 20.6 L17.6 14.6 z",
+            ),
+            Icon::SelectAll => (
+                "M4 6.6 V4 H6.6 M17.4 4 H20 V6.6 M20 17.4 V20 H17.4 M6.6 20 H4 V17.4 \
+                 M10.2 4 H13.8 M20 10.2 V13.8 M13.8 20 H10.2 M4 13.8 V10.2 \
+                 M9.4 8.8 L16 11.9 L13 13 L11.8 16.1 Z",
+                "",
+            ),
+            // a biblioteca com um "+" no lugar do livro inclinado
+            Icon::AddToLibrary => (
+                "M4.6 4 V20 M8.6 4 V20 M4 4.3 H9.2 M4 19.7 H9.2 M12.2 5.4 L15.6 4.5 L16.9 9 \
+                 M17.4 12.6 V20.6 M13.4 16.6 H21.4",
+                "",
+            ),
+            // tomada: o assistente se liga ao editor
+            Icon::Mcp => (
+                "M9 3.4 V7.4 M15 3.4 V7.4 M6.4 7.4 H17.6 V11 C17.6 14.1 15.1 16.6 12 16.6 \
+                 C8.9 16.6 6.4 14.1 6.4 11 Z M12 16.6 V20.8",
+                "",
             ),
         }
     }
@@ -706,6 +834,25 @@ mod tests {
             Icon::Delete,
             Icon::Library,
             Icon::Help,
+            Icon::SaveAs,
+            Icon::NewFile,
+            Icon::ExportFrame,
+            Icon::Cut,
+            Icon::Copy,
+            Icon::Paste,
+            Icon::CopyStyles,
+            Icon::PasteStyles,
+            Icon::Snap,
+            Icon::Zen,
+            Icon::ViewMode,
+            Icon::Stats,
+            Icon::Group,
+            Icon::Ungroup,
+            Icon::FlipH,
+            Icon::FlipV,
+            Icon::SelectAll,
+            Icon::AddToLibrary,
+            Icon::Mcp,
         ];
         for icon in all {
             let (stroke, fill) = icon.paths();
@@ -715,6 +862,39 @@ mod tests {
                 assert!(!sub.segs.is_empty());
                 for p in sub.flatten() {
                     assert!((1.0..=23.0).contains(&p[0]) && (1.0..=23.0).contains(&p[1]));
+                }
+            }
+        }
+    }
+
+    /// `paint` preenche com `convex_polygon`: um subcaminho côncavo sairia torto.
+    #[test]
+    fn fill_subpaths_are_convex() {
+        for icon in [
+            Icon::Line,
+            Icon::Image,
+            Icon::ExportPng,
+            Icon::ExportSvg,
+            Icon::SendBackward,
+            Icon::BringForward,
+            Icon::Help,
+            Icon::Zen,
+            Icon::Group,
+            Icon::FlipH,
+            Icon::FlipV,
+        ] {
+            for sub in parse(icon.paths().1) {
+                let pts = sub.flatten();
+                let n = pts.len();
+                let mut sign = 0.0f32;
+                for i in 0..n {
+                    let (a, b, c) = (pts[i], pts[(i + 1) % n], pts[(i + 2) % n]);
+                    let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+                    if cross.abs() < 1e-4 {
+                        continue;
+                    }
+                    assert!(sign == 0.0 || sign == cross.signum(), "{:?}", sub.start);
+                    sign = cross.signum();
                 }
             }
         }
