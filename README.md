@@ -9,7 +9,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 ## Recursos
 
 - **Formas**: retângulo, losango, elipse, seta, linha, desenho livre e texto. Duplo clique numa forma escreve dentro dela; como no Excalidraw, o texto quebra na largura da forma e a forma cresce quando ele não cabe
-- **Imagens**: cole um print com `Ctrl+V`, arraste PNG/JPG/GIF/WebP para a janela ou use `9` para escolher o arquivo. A imagem fica embutida no `.excalidraw` (campo `files`, igual ao Excalidraw), pode ser movida, redimensionada (mantém a proporção; `Shift` libera), girada e invertida, e sai no PNG e no SVG exportados
+- **Imagens**: cole um print com `Ctrl+V`, arraste PNG/JPG/GIF/WebP/SVG/BMP para a janela ou use `9` para escolher o arquivo. A imagem fica embutida no `.excalidraw` (campo `files`, igual ao Excalidraw), pode ser movida, redimensionada (mantém a proporção; `Shift` libera), girada e invertida, e sai no PNG e no SVG exportados
 - **Visual "desenhado à mão"**: traços irregulares com os mesmos algoritmos do rough.js (o motor do Excalidraw), determinísticos por `seed`
 - **Estilos**: cor de traço e fundo, preenchimento (hachura, hachura cruzada, sólido), espessura, tracejado/pontilhado, "desleixo" (arquiteto/artista/cartunista), bordas arredondadas, opacidade, pontas de seta (seta, triângulo, barra, ponto), fonte (à mão/normal/código), tamanho e alinhamento
 - **Edição**: seleção por clique ou caixa, mover, redimensionar (inclusive girado), girar (Shift = passos de 15°), editar pontos de linhas, linhas ponto a ponto, duplicar (Ctrl+D ou Alt+arrastar), agrupar, camadas, borracha, desfazer/refazer

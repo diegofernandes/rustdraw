@@ -639,11 +639,12 @@ fn image_source(files: &mut Map<String, Value>, s: &Spec) -> Result<files::Added
         return files::add_bytes(files, &bytes).map_err(|e| format!("{path}: {e}"));
     }
     let id = string(s, "fileId")?.ok_or("imagem precisa de `path` (arquivo PNG/JPG)")?;
-    let img = files::decode(files, id).ok_or_else(|| format!("fileId {id:?} não está na cena"))?;
+    let (width, height) =
+        files::natural_size(files, id).ok_or_else(|| format!("fileId {id:?} não está na cena"))?;
     Ok(files::Added {
         id: id.into(),
-        width: img.width(),
-        height: img.height(),
+        width,
+        height,
     })
 }
 

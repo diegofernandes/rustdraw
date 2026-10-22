@@ -1890,7 +1890,10 @@ impl App {
         self.finish_linear();
         let fut = rfd::AsyncFileDialog::new()
             .set_title("Inserir imagem")
-            .add_filter("Imagens", &["png", "jpg", "jpeg", "gif", "webp"])
+            .add_filter(
+                "Imagens",
+                &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"],
+            )
             .pick_file();
         self.start_dialog(DialogKind::Image, fut);
     }
@@ -1902,7 +1905,7 @@ impl App {
         }
     }
 
-    /// Insere uma imagem (bytes PNG/JPG/GIF/WebP) com o centro em `at`
+    /// Insere uma imagem (bytes PNG/JPG/GIF/WebP/SVG/BMP) com o centro em `at`
     /// (padrão: o centro da tela), como o Excalidraw faz ao colar ou arrastar.
     pub fn insert_image(&mut self, bytes: &[u8], at: Option<P>) {
         if self.view_mode {
