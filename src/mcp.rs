@@ -12,8 +12,9 @@ use crate::export::{self, ExportOpts};
 use crate::fonts;
 use crate::frame;
 use crate::live;
-use crate::model::SceneFile;
+use crate::model::{Element, SceneFile};
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -225,7 +226,7 @@ impl Server {
         } else {
             edit::load(path).and_then(|mut scene| {
                 let source = path.display().to_string();
-                let (r, changed) = run_tool(name, args, &mut scene, &source)?;
+                let (r, changed) = run_tool(name, args, &mut scene, &source, None)?;
                 if changed {
                     edit::save(path, &scene)?;
                 }
@@ -273,12 +274,14 @@ fn new_scene_file(args: &Map<String, Value>, path: &Path) -> Result<Value, Strin
 
 /// Executa uma ferramenta sobre uma cena em memória (de um arquivo ou do editor
 /// aberto). Devolve o resultado do `tools/call` e se a cena mudou; num erro a
-/// cena fica como estava. `source` diz de onde a cena veio.
+/// cena fica como estava. `source` diz de onde a cena veio; `selected` é a
+/// seleção do editor (`None` num arquivo, que não tem seleção).
 pub fn run_tool(
     name: &str,
     args: &Map<String, Value>,
     scene: &mut SceneFile,
     source: &str,
+    selected: Option<&HashSet<String>>,
 ) -> Result<(Value, bool), String> {
     let changed = matches!(
         name,
@@ -295,7 +298,7 @@ pub fn run_tool(
             *scene = SceneFile::new(vec![], &bg, scene.grid_enabled());
             json!({"cleared": source})
         }
-        "get_scene" => get_scene(args, scene, source),
+        "get_scene" => get_scene(args, scene, source, selected),
         "add_elements" => modify(scene, args, "elements", |els, files, v| {
             let ids = edit::add(els, files, list(v)?)?;
             Ok(json!({"added": ids}))
@@ -310,14 +313,19 @@ pub fn run_tool(
             let n = edit::delete(els, &ids)?;
             Ok(json!({"deleted": n}))
         })?,
-        "export_image" => export_image(args, scene)?,
-        "preview" => return Ok((preview(args, scene)?, false)),
+        "export_image" => export_image(args, scene, selected)?,
+        "preview" => return Ok((preview(args, scene, selected)?, false)),
         _ => return Err(format!("ferramenta desconhecida: {name}")),
     };
     Ok((text_result(v, false), changed))
 }
 
-fn get_scene(args: &Map<String, Value>, scene: &SceneFile, source: &str) -> Value {
+fn get_scene(
+    args: &Map<String, Value>,
+    scene: &SceneFile,
+    source: &str,
+    selected: Option<&HashSet<String>>,
+) -> Value {
     if args.get("raw").and_then(|v| v.as_bool()) == Some(true) {
         return json!(scene.to_json());
     }
@@ -326,12 +334,22 @@ fn get_scene(args: &Map<String, Value>, scene: &SceneFile, source: &str) -> Valu
         json!({"x": b.min.x.round(), "y": b.min.y.round(),
                "width": b.width().round(), "height": b.height().round()})
     });
-    json!({
+    let mut out = json!({
         "file": source,
         "viewBackgroundColor": scene.view_background(),
         "bounds": bounds,
         "elements": els.iter().map(|e| edit::summary(e, els)).collect::<Vec<_>>(),
-    })
+    });
+    if let Some(sel) = selected {
+        // na ordem do desenho
+        let ids: Vec<&str> = els
+            .iter()
+            .filter(|e| sel.contains(&e.id))
+            .map(|e| e.id.as_str())
+            .collect();
+        out["selected"] = json!(ids);
+    }
+    out
 }
 
 /// Aplica `f` numa cópia dos elementos e só a mantém se der certo.
@@ -352,6 +370,66 @@ fn modify(
     scene.elements = els;
     scene.set_files(&files);
     Ok(out)
+}
+
+/// `selection: true` num arquivo.
+const SELECTION_IN_FILE: &str = "`selection` usa a seleção do editor aberto: tire o parâmetro \
+`file` (ou passe os elementos em `ids`).";
+
+/// O que exportar: tudo, os elementos de `ids` ou, com `selection: true`, os
+/// selecionados no editor, levando os rótulos e o conteúdo dos frames. Como na
+/// exportação do editor, um frame sozinho (com ou sem o conteúdo) sai como
+/// frame, recortado pela borda.
+fn export_job(
+    scene: &SceneFile,
+    args: &Map<String, Value>,
+    scale: f32,
+    selected: Option<&HashSet<String>>,
+) -> Result<(Vec<Element>, ExportOpts), String> {
+    let mut o = opts(scene, args, scale);
+    let ids: HashSet<String> = if args.get("selection").and_then(|v| v.as_bool()) == Some(true) {
+        let sel = selected.ok_or(SELECTION_IN_FILE)?;
+        if sel.is_empty() {
+            return Err("nada selecionado no editor".into());
+        }
+        sel.clone()
+    } else if let Some(v) = args.get("ids") {
+        let ids: Vec<String> = serde_json::from_value(v.clone())
+            .map_err(|_| "`ids` precisa ser uma lista de ids".to_string())?;
+        if ids.is_empty() {
+            return Err("`ids` está vazio".into());
+        }
+        ids.into_iter().collect()
+    } else {
+        return Ok((scene.elements.clone(), o));
+    };
+    if o.frame.is_some() {
+        return Err("use `frame` ou `ids`/`selection`, não os dois".into());
+    }
+    let els = &scene.elements;
+    let missing: Vec<&str> = ids
+        .iter()
+        .filter(|id| !els.iter().any(|e| &e.id == *id))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("elementos não encontrados: {}", missing.join(", ")));
+    }
+    let chosen = || els.iter().filter(|e| ids.contains(&e.id));
+    let mut frames = chosen().filter(|e| frame::is_frame(e));
+    if let (Some(f), None) = (frames.next(), frames.next())
+        && chosen().all(|e| frame::is_frame(e) || e.frame_id.as_deref() == Some(f.id.as_str()))
+    {
+        o.frame = Some(f.id.clone());
+        return Ok((els.clone(), o));
+    }
+    let keep = frame::with_children(els, &ids);
+    let picked = els
+        .iter()
+        .filter(|e| keep.contains(&e.id))
+        .cloned()
+        .collect();
+    Ok((picked, o))
 }
 
 fn opts(scene: &SceneFile, args: &Map<String, Value>, scale: f32) -> ExportOpts {
@@ -375,36 +453,38 @@ fn opts(scene: &SceneFile, args: &Map<String, Value>, scale: f32) -> ExportOpts 
     o
 }
 
-fn export_image(args: &Map<String, Value>, scene: &SceneFile) -> Result<Value, String> {
+fn export_image(
+    args: &Map<String, Value>,
+    scene: &SceneFile,
+    selected: Option<&HashSet<String>>,
+) -> Result<Value, String> {
     let output = args
         .get("output")
         .and_then(|v| v.as_str())
-        .ok_or("falta `output` (caminho .png ou .svg)")?;
-    let opts = opts(scene, args, 2.0);
-    let lower = output.to_lowercase();
-    let data = if lower.ends_with(".svg") {
-        export::render_svg(&scene.elements, &opts)?.into_bytes()
-    } else if lower.ends_with(".png") {
-        export::render_png(&scene.elements, &opts)?
-    } else {
-        return Err("`output` precisa terminar em .png ou .svg".into());
-    };
+        .ok_or("falta `output` (caminho .png, .svg ou .tex)")?;
+    let (els, opts) = export_job(scene, args, 2.0, selected)?;
+    let format = export::Format::from_path(output)
+        .ok_or("`output` precisa terminar em .png, .svg, .tex ou .tikz")?;
     let out = Path::new(output);
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    std::fs::write(out, &data).map_err(|e| format!("{output}: {e}"))?;
-    Ok(json!({"written": output, "bytes": data.len()}))
+    let bytes = export::write_file(out, format, &els, &opts)?;
+    Ok(json!({"written": output, "bytes": bytes}))
 }
 
-fn preview(args: &Map<String, Value>, scene: &SceneFile) -> Result<Value, String> {
-    let mut opts = opts(scene, args, 1.0);
-    let b = export::export_bounds(&scene.elements, &opts).ok_or("nada para mostrar")?;
+fn preview(
+    args: &Map<String, Value>,
+    scene: &SceneFile,
+    selected: Option<&HashSet<String>>,
+) -> Result<Value, String> {
+    let (els, mut opts) = export_job(scene, args, 1.0, selected)?;
+    let b = export::export_bounds(&els, &opts).ok_or("nada para mostrar")?;
     let side = (b.width().max(b.height()) + opts.padding * 2.0) * opts.scale;
     if side > PREVIEW_MAX_PX {
         opts.scale *= PREVIEW_MAX_PX / side;
     }
-    let png = export::render_png(&scene.elements, &opts)?;
+    let png = export::render_png(&els, &opts)?;
     Ok(
         json!({"content": [{"type": "image", "data": fonts::base64(&png), "mimeType": "image/png"}]}),
     )
@@ -414,6 +494,14 @@ fn list(v: &Value) -> Result<&[Value], String> {
     v.as_array()
         .map(Vec::as_slice)
         .ok_or_else(|| "precisa ser uma lista de objetos".into())
+}
+
+fn ids_prop() -> Value {
+    json!({"type": "array", "items": {"type": "string"}, "description": "Só estes elementos (ids), com os rótulos deles e o conteúdo dos frames. Um frame sozinho sai recortado pela borda, como em `frame`."})
+}
+
+fn selection_prop() -> Value {
+    json!({"type": "boolean", "description": "Só o que o usuário selecionou no editor aberto (sem `file`); os ids estão em `selected` no get_scene."})
 }
 
 fn file_prop() -> Value {
@@ -489,7 +577,7 @@ fn tools() -> Value {
         },
         {
             "name": "get_scene",
-            "description": "Lista os elementos do desenho (id, tipo, posição, tamanho, texto, estilo, ligações das setas, rótulos) e a área ocupada.",
+            "description": "Lista os elementos do desenho (id, tipo, posição, tamanho, texto, estilo, ligações das setas, rótulos) e a área ocupada. No editor aberto, `selected` traz os ids selecionados pelo usuário.",
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
                 "raw": {"type": "boolean", "description": "Devolve o JSON completo do arquivo."}
@@ -521,14 +609,16 @@ fn tools() -> Value {
         },
         {
             "name": "export_image",
-            "description": "Exporta o desenho para PNG ou SVG (pela extensão de `output`).",
+            "description": "Exporta o desenho para PNG, SVG ou TikZ/LaTeX (pela extensão de `output`; o TikZ grava as imagens numa pasta ao lado).",
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
-                "output": {"type": "string", "description": "Caminho de saída .png ou .svg."},
+                "output": {"type": "string", "description": "Caminho de saída .png, .svg ou .tex (TikZ)."},
                 "scale": {"type": "number", "description": "Escala do PNG, padrão 2."},
                 "dark": {"type": "boolean", "description": "Modo escuro."},
                 "background": {"type": "boolean", "description": "Com fundo (padrão true)."},
-                "frame": {"type": "string", "description": "Exporta só o conteúdo deste frame (nome ou id)."}
+                "frame": {"type": "string", "description": "Exporta só o conteúdo deste frame (nome ou id)."},
+                "ids": ids_prop(),
+                "selection": selection_prop()
             }, "required": ["output"]}
         },
         {
@@ -538,7 +628,9 @@ fn tools() -> Value {
                 "file": file_prop(),
                 "scale": {"type": "number", "description": "Padrão 1 (a imagem é limitada a 1600 px)."},
                 "dark": {"type": "boolean"},
-                "frame": {"type": "string", "description": "Mostra só este frame (nome ou id)."}
+                "frame": {"type": "string", "description": "Mostra só este frame (nome ou id)."},
+                "ids": ids_prop(),
+                "selection": selection_prop()
             }}
         }
     ])
@@ -628,11 +720,17 @@ mod tests {
     fn run_tool_in_memory() {
         let mut scene = SceneFile::new(vec![], "#ffffff", false);
         let args = json!({"elements": [{"type": "ellipse", "id": "e"}]});
-        let (r, changed) =
-            run_tool("add_elements", args.as_object().unwrap(), &mut scene, "app").unwrap();
+        let (r, changed) = run_tool(
+            "add_elements",
+            args.as_object().unwrap(),
+            &mut scene,
+            "app",
+            None,
+        )
+        .unwrap();
         assert!(changed, "{r}");
         assert_eq!(scene.elements.len(), 1);
-        let (r, changed) = run_tool("get_scene", &Map::new(), &mut scene, "app").unwrap();
+        let (r, changed) = run_tool("get_scene", &Map::new(), &mut scene, "app", None).unwrap();
         assert!(!changed);
         assert!(
             r["content"][0]["text"]
@@ -646,12 +744,78 @@ mod tests {
                 "delete_elements",
                 bad.as_object().unwrap(),
                 &mut scene,
-                "app"
+                "app",
+                None
             )
             .is_err()
         );
         assert_eq!(scene.elements.len(), 1, "erro não muda a cena");
-        let (_, changed) = run_tool("new_scene", &Map::new(), &mut scene, "app").unwrap();
+        let (_, changed) = run_tool("new_scene", &Map::new(), &mut scene, "app", None).unwrap();
         assert!(changed && scene.elements.is_empty());
+    }
+
+    #[test]
+    fn export_only_some_elements_or_the_editor_selection() {
+        let mut scene = SceneFile::new(vec![], "#ffffff", false);
+        let args = json!({"elements": [
+            {"type": "rectangle", "id": "a", "label": "Alfa"},
+            {"type": "ellipse", "id": "b", "x": 400, "label": "Beta"}
+        ]});
+        run_tool(
+            "add_elements",
+            args.as_object().unwrap(),
+            &mut scene,
+            "app",
+            None,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("rustdraw-mcp-{}", crate::model::new_id()));
+        let tex = dir.join("sel.tex");
+        let export = |args: Value, scene: &mut SceneFile, sel: Option<&HashSet<String>>| {
+            let mut a = args.as_object().unwrap().clone();
+            a.insert("output".into(), json!(tex.to_str().unwrap()));
+            run_tool("export_image", &a, scene, "app", sel)
+                .map(|_| std::fs::read_to_string(&tex).unwrap())
+        };
+        // por ids: a forma sai com o rótulo, a outra fica de fora
+        let code = export(json!({"ids": ["a"]}), &mut scene, None).unwrap();
+        assert!(
+            code.contains("{Alfa}") && !code.contains("{Beta}"),
+            "{code}"
+        );
+        // a seleção do editor
+        let sel: HashSet<String> = ["b".to_string()].into();
+        let code = export(json!({"selection": true}), &mut scene, Some(&sel)).unwrap();
+        assert!(
+            code.contains("{Beta}") && !code.contains("{Alfa}"),
+            "{code}"
+        );
+        assert!(
+            export(json!({"selection": true}), &mut scene, None).is_err(),
+            "arquivo não tem seleção"
+        );
+        assert!(
+            export(
+                json!({"selection": true}),
+                &mut scene,
+                Some(&HashSet::new())
+            )
+            .is_err()
+        );
+        assert!(export(json!({"ids": ["nada"]}), &mut scene, None).is_err());
+        // o get_scene do editor diz o que está selecionado
+        let (r, _) = run_tool("get_scene", &Map::new(), &mut scene, "app", Some(&sel)).unwrap();
+        let v: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v["selected"], json!(["b"]));
+        let (r, _) = run_tool(
+            "preview",
+            json!({"ids": ["a"]}).as_object().unwrap(),
+            &mut scene,
+            "app",
+            None,
+        )
+        .unwrap();
+        assert_eq!(r["content"][0]["mimeType"], "image/png");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

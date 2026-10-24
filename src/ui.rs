@@ -1172,6 +1172,7 @@ enum Act {
     Paste,
     CopyPng,
     CopySvg,
+    CopyTikz,
     CopyText,
     SelectAll,
     UnlockAll,
@@ -1235,6 +1236,7 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
         if has_elements {
             v.push(Item("Copiar como PNG", "Shift+Alt+C", Act::CopyPng, None));
             v.push(Item("Copiar como SVG", "", Act::CopySvg, None));
+            v.push(Item("Copiar como TikZ", "", Act::CopyTikz, None));
         }
         if has_text {
             v.push(Item("Copiar texto", "", Act::CopyText, None));
@@ -1260,6 +1262,7 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
             Sep,
             Item("Copiar como PNG", "Shift+Alt+C", Act::CopyPng, None),
             Item("Copiar como SVG", "", Act::CopySvg, None),
+            Item("Copiar como TikZ", "", Act::CopyTikz, None),
         ]);
         if has_text {
             v.push(Item("Copiar texto", "", Act::CopyText, None));
@@ -1327,6 +1330,7 @@ fn act_icon(app: &App, act: Act) -> Icon {
         Act::Paste => Icon::Paste,
         Act::CopyPng => Icon::ExportPng,
         Act::CopySvg => Icon::ExportSvg,
+        Act::CopyTikz => Icon::ExportTikz,
         Act::CopyText => Icon::Text,
         Act::SelectAll => Icon::SelectAll,
         Act::UnlockAll => Icon::Lock(false),
@@ -1366,6 +1370,7 @@ fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
         }
         Act::CopyPng => app.copy_png(ctx),
         Act::CopySvg => app.copy_selection_svg(ctx),
+        Act::CopyTikz => app.copy_selection_tikz(ctx),
         Act::CopyText => app.copy_text(ctx),
         Act::SelectAll => app.select_all(),
         Act::UnlockAll => app.unlock_all(),
@@ -1776,21 +1781,35 @@ fn export_window(app: &mut App, ctx: &egui::Context) {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                use crate::export::Format;
                 if labeled_button(ui, Icon::ExportPng, "PNG").clicked() {
-                    app.export_file(false);
+                    app.export_file(Format::Png);
                 }
                 if labeled_button(ui, Icon::ExportSvg, "SVG").clicked() {
-                    app.export_file(true);
+                    app.export_file(Format::Svg);
                 }
+                if labeled_button(ui, Icon::ExportTikz, "TikZ").clicked() {
+                    app.export_file(Format::Tikz);
+                }
+            });
+            ui.horizontal(|ui| {
                 if ui.button("Copiar SVG").clicked() {
                     app.copy_svg(ctx);
                 }
+                if ui.button("Copiar TikZ").clicked() {
+                    app.copy_tikz(ctx);
+                }
             });
-            ui.label(
-                RichText::new("O SVG embute a fonte Virgil e abre offline em qualquer navegador.")
-                    .size(11.0)
-                    .color(ui.visuals().weak_text_color()),
-            );
+            for note in [
+                "O SVG embute a fonte Virgil e abre offline em qualquer navegador.",
+                "O TikZ (LaTeX) sai com traço limpo; texto entre $…$ vira fórmula.",
+            ] {
+                ui.label(
+                    RichText::new(note)
+                        .size(11.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
         });
     app.show_export = open && app.show_export;
 }

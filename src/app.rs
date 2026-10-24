@@ -329,7 +329,7 @@ enum DialogKind {
     /// Salvar e, se der certo, seguir com a ação adiada pela confirmação.
     Save(Option<Pending>),
     Export {
-        svg: bool,
+        format: export::Format,
         els: Vec<Element>,
         opts: ExportOpts,
         base: String,
@@ -940,24 +940,16 @@ impl App {
                 ))),
             },
             DialogKind::Export {
-                svg,
+                format,
                 els,
                 opts,
                 base,
             } => {
-                let ext = if svg { "svg" } else { "png" };
-                let Some(path) = r.unwrap_or_else(|()| fallback_path(&base, ext)) else {
+                let Some(path) = r.unwrap_or_else(|()| fallback_path(&base, format.ext())) else {
                     return;
                 };
-                let res = if svg {
-                    export::render_svg(&els, &opts)
-                        .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
-                } else {
-                    export::render_png(&els, &opts)
-                        .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
-                };
-                match res {
-                    Ok(()) => self.toast(format!("Exportado: {}", path.display())),
+                match export::write_file(&path, format, &els, &opts) {
+                    Ok(_) => self.toast(format!("Exportado: {}", path.display())),
                     Err(e) => self.toast(format!("Erro ao exportar: {e}")),
                 }
             }
@@ -1372,7 +1364,13 @@ impl App {
                 }
                 Some(true) => {
                     let mut scene = self.scene_file();
-                    match mcp::run_tool(&req.name, &req.args, &mut scene, &source) {
+                    match mcp::run_tool(
+                        &req.name,
+                        &req.args,
+                        &mut scene,
+                        &source,
+                        Some(&self.selected),
+                    ) {
                         Ok((r, c)) => {
                             let ok = r["isError"] != true;
                             let detail = match (ok, c) {
@@ -1680,7 +1678,7 @@ impl App {
         }
     }
 
-    pub fn export_file(&mut self, svg: bool) {
+    pub fn export_file(&mut self, format: export::Format) {
         let (els, opts) = self.export_job();
         if export::export_bounds(&els, &opts).is_none() {
             self.toast("Nada para exportar");
@@ -1700,15 +1698,14 @@ impl App {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "desenho".into()),
         };
-        let (ext, label) = if svg { ("svg", "SVG") } else { ("png", "PNG") };
         let fut = rfd::AsyncFileDialog::new()
-            .set_title(format!("Exportar {label}"))
-            .add_filter(label, &[ext])
-            .set_file_name(format!("{base}.{ext}"))
+            .set_title(format!("Exportar {}", format.label()))
+            .add_filter(format.label(), format.exts())
+            .set_file_name(format!("{base}.{}", format.ext()))
             .save_file();
         self.start_dialog(
             DialogKind::Export {
-                svg,
+                format,
                 els,
                 opts,
                 base,
@@ -1735,6 +1732,30 @@ impl App {
             Ok(s) => {
                 ctx.copy_text(s);
                 self.toast("SVG copiado para a área de transferência");
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
+    pub fn copy_tikz(&mut self, ctx: &egui::Context) {
+        let (els, opts) = self.export_job();
+        self.copy_tikz_of(ctx, &els, &opts);
+    }
+
+    /// Copia a seleção (ou tudo) como TikZ — "Copiar como TikZ" do menu de contexto.
+    pub fn copy_selection_tikz(&mut self, ctx: &egui::Context) {
+        let (els, opts) = self.copy_job();
+        if !els.is_empty() {
+            self.copy_tikz_of(ctx, &els, &opts);
+        }
+    }
+
+    /// Na área de transferência não há onde pôr as imagens: saem como um quadro.
+    fn copy_tikz_of(&mut self, ctx: &egui::Context, els: &[Element], opts: &ExportOpts) {
+        match crate::tikz::render_tikz(els, opts, None) {
+            Ok(t) => {
+                ctx.copy_text(t.code);
+                self.toast("TikZ copiado para a área de transferência");
             }
             Err(e) => self.toast(e),
         }
