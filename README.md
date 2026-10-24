@@ -23,7 +23,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Biblioteca de formas**: guarde formas e grupos para reutilizar (botão **Biblioteca** no canto superior direito, `+` ou "Adicionar à biblioteca" no botão direito). Clique num item para inserir no centro da tela ou arraste para posicionar; `Shift+clique` marca itens para exportar ou remover. O botão direito num item renomeia, edita no canvas (altere, selecione e clique em "Salvar no item"), reordena, exporta ou remove; também dá para reordenar arrastando um item sobre outro. Remoções e edições podem ser desfeitas no próprio painel. Importa e exporta arquivos `.excalidrawlib` (versões 1 e 2) — dá para usar bibliotecas baixadas do Excalidraw sem depender do site. A biblioteca fica salva localmente no diretório de dados do usuário
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
-- **TikZ (LaTeX)**: o botão **TikZ** da exportação grava um `.tex` com um `tikzpicture` para pôr no documento com `\input{...}`; "Copiar TikZ" (ou "Copiar como TikZ" no botão direito) copia o código. Formas, setas (com as pontas do `arrows.meta`), hachuras (`patterns.meta`), cores, tracejados, opacidade, rotação e frames viram comandos do TikZ com **traço limpo**, sem o efeito à mão. Cada linha de texto é um `\node` na fonte do documento (a fonte normal sai em `\sffamily` e a de código em `\ttfamily`), e o que estiver entre `$...$` passa como fórmula: `$E = mc^2$` vira matemática, mas "R$ 5" continua texto. As imagens são gravadas numa pasta `<nome>-imagens` ao lado do `.tex` e entram com `\includegraphics`; ao copiar, ficam como um quadro cinza. As linhas que o LaTeX precisa no preâmbulo vêm comentadas no começo do arquivo
+- **TikZ (LaTeX)**: o botão **TikZ** da exportação (que respeita "Somente a seleção") grava um `.tex` com um `tikzpicture` para pôr no documento com `\input{...}`; "Copiar TikZ" (ou "Copiar como TikZ" no botão direito, que copia só o que está selecionado) copia o código. Formas, setas (com as pontas do `arrows.meta`), hachuras (`patterns.meta`), cores, tracejados, opacidade, rotação e frames viram comandos do TikZ com **traço limpo**, sem o efeito à mão. Cada linha de texto é um `\node` na fonte do documento (a fonte normal sai em `\sffamily` e a de código em `\ttfamily`), e o que estiver entre `$...$` passa como fórmula: `$E = mc^2$` vira matemática, mas "R$ 5" continua texto. As imagens são gravadas numa pasta `<nome>-imagens` ao lado do `.tex` e entram com `\includegraphics`; ao copiar, ficam como um quadro cinza. As linhas que o LaTeX precisa no preâmbulo vêm comentadas no começo do arquivo
 - **Posição e "Ir para"**: o rodapé mostra a posição do cursor na cena (X, Y, as mesmas coordenadas do `.excalidraw`). Clicar nela, ou `Alt+G`, abre "Ir para posição": digite X e Y (ou cole "120, -45" no X) e a tela centraliza nesse ponto, sem mudar o zoom
 - **Conforto**: tema escuro, grade com encaixe, zoom no cursor, salvamento automático (o desenho volta ao reabrir), arrastar arquivo para a janela
 
@@ -103,12 +103,12 @@ Para editar arquivos sem o editor aberto, use o `rustdraw mcp` também no Claude
 | Ferramenta | O que faz |
 |---|---|
 | `new_scene` | Cria um desenho vazio |
-| `get_scene` | Lista os elementos (id, tipo, posição, tamanho, texto, estilo, ligações) |
+| `get_scene` | Lista os elementos (id, tipo, posição, tamanho, texto, estilo, ligações) e, no editor aberto, os ids selecionados (`selected`) |
 | `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`), `{"type": "note", "label": "..."}` cria uma nota adesiva e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
 | `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
 | `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
-| `export_image` | Grava PNG, SVG ou TikZ (`.tex`), do desenho todo ou de um frame, em `frame` |
-| `preview` | Devolve um PNG do desenho (ou de um frame) para o assistente conferir o resultado |
+| `export_image` | Grava PNG, SVG ou TikZ (`.tex`): o desenho todo, um frame (`frame`), alguns elementos (`ids`) ou o que está selecionado no editor aberto (`selection: true`) |
+| `preview` | Devolve um PNG do desenho (ou de um frame, de alguns elementos ou da seleção, como no `export_image`) para o assistente conferir o resultado |
 
 ### Editar o desenho aberto no editor
 

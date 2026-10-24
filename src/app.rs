@@ -1364,7 +1364,13 @@ impl App {
                 }
                 Some(true) => {
                     let mut scene = self.scene_file();
-                    match mcp::run_tool(&req.name, &req.args, &mut scene, &source) {
+                    match mcp::run_tool(
+                        &req.name,
+                        &req.args,
+                        &mut scene,
+                        &source,
+                        Some(&self.selected),
+                    ) {
                         Ok((r, c)) => {
                             let ok = r["isError"] != true;
                             let detail = match (ok, c) {
