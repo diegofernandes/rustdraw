@@ -9,11 +9,11 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 ## Recursos
 
 - **Formas**: retângulo, losango, elipse, seta, linha, desenho livre e texto. Duplo clique numa forma escreve dentro dela; como no Excalidraw, o texto quebra na largura da forma e a forma cresce quando ele não cabe
-- **Imagens**: cole um print com `Ctrl+V`, arraste PNG/JPG/GIF/WebP/SVG/BMP para a janela ou use `9` para escolher o arquivo. A imagem fica embutida no `.excalidraw` (campo `files`, igual ao Excalidraw), pode ser movida, redimensionada (mantém a proporção; `Shift` libera), girada e invertida, e sai no PNG e no SVG exportados
+- **Imagens**: cole um print com `Ctrl+V`, arraste PNG/JPG/GIF/WebP/SVG/BMP para a janela ou use `9` para escolher o arquivo. A imagem fica embutida no `.excalidraw` (campo `files`, igual ao Excalidraw), pode ser movida, redimensionada (mantém a proporção; `Shift` libera), girada e invertida, e sai no PNG, no SVG e no TikZ exportados
 - **Visual "desenhado à mão"**: traços irregulares com os mesmos algoritmos do rough.js (o motor do Excalidraw), determinísticos por `seed`
 - **Estilos**: cor de traço e fundo, preenchimento (hachura, hachura cruzada, sólido), espessura, tracejado/pontilhado, "desleixo" (arquiteto/artista/cartunista), bordas arredondadas, opacidade, pontas de seta (seta, triângulo, barra, ponto), fonte (à mão/normal/código), tamanho e alinhamento
 - **Edição**: seleção por clique ou caixa, mover, redimensionar (inclusive girado), girar (Shift = passos de 15°), editar pontos de linhas, linhas ponto a ponto, duplicar (Ctrl+D ou Alt+arrastar), agrupar, camadas, borracha, desfazer/refazer
-- **Menu do botão direito**: como no Excalidraw, um menu para o canvas vazio (colar, copiar como PNG/SVG, selecionar tudo, destravar tudo, grade, modo zen, visualização, estatísticas) e outro para elementos (recortar, copiar, colar, estilos, agrupar, camadas, inverter, duplicar, travar, apagar), com os atalhos ao lado de cada item
+- **Menu do botão direito**: como no Excalidraw, um menu para o canvas vazio (colar, copiar como PNG/SVG/TikZ, selecionar tudo, destravar tudo, grade, modo zen, visualização, estatísticas) e outro para elementos (recortar, copiar, colar, estilos, agrupar, camadas, inverter, duplicar, travar, apagar), com os atalhos ao lado de cada item
 - **Tipos de seta** (como no Excalidraw): **afiada** (segmentos retos), **curva** e **cotovelo** (só segmentos horizontais e verticais, com a rota contornando as formas ligadas), escolhidos em "Tipo de seta" no painel
 - **Pontos de edição**: numa linha ou seta selecionada, arraste a alça do meio de um segmento (ou dê duplo clique na linha) para criar um ponto; clique nos pontos para selecioná-los (Shift soma), arraste para mover e `Delete` apaga. Em setas em cotovelo, arraste o meio de um segmento para deslocá-lo (ele fica fixo); duplo clique nessa alça devolve o segmento à rota automática
 - **Setas que grudam nas formas**: a ponta da seta liga num retângulo, losango, elipse ou texto e acompanha a forma quando ela é movida, redimensionada ou girada. Perto do meio de um lado, encaixa nesse **ponto fixo**; no resto da forma fica **livre**, mirando o centro e parando no contorno. Segure `Ctrl` (`Cmd` no macOS) ao arrastar para não grudar; mover só a seta a solta
@@ -23,6 +23,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Biblioteca de formas**: guarde formas e grupos para reutilizar (botão **Biblioteca** no canto superior direito, `+` ou "Adicionar à biblioteca" no botão direito). Clique num item para inserir no centro da tela ou arraste para posicionar; `Shift+clique` marca itens para exportar ou remover. O botão direito num item renomeia, edita no canvas (altere, selecione e clique em "Salvar no item"), reordena, exporta ou remove; também dá para reordenar arrastando um item sobre outro. Remoções e edições podem ser desfeitas no próprio painel. Importa e exporta arquivos `.excalidrawlib` (versões 1 e 2) — dá para usar bibliotecas baixadas do Excalidraw sem depender do site. A biblioteca fica salva localmente no diretório de dados do usuário
 - **Compatível com `.excalidraw`**: abre e salva o mesmo JSON do excalidraw.com, preservando campos que o RustDraw não conhece. Ctrl+C gera o formato da área de transferência do Excalidraw — dá para colar direto lá
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
+- **TikZ (LaTeX)**: o botão **TikZ** da exportação grava um `.tex` com um `tikzpicture` para pôr no documento com `\input{...}`; "Copiar TikZ" (ou "Copiar como TikZ" no botão direito) copia o código. Formas, setas (com as pontas do `arrows.meta`), hachuras (`patterns.meta`), cores, tracejados, opacidade, rotação e frames viram comandos do TikZ com **traço limpo**, sem o efeito à mão. Cada linha de texto é um `\node` na fonte do documento (a fonte normal sai em `\sffamily` e a de código em `\ttfamily`), e o que estiver entre `$...$` passa como fórmula: `$E = mc^2$` vira matemática, mas "R$ 5" continua texto. As imagens são gravadas numa pasta `<nome>-imagens` ao lado do `.tex` e entram com `\includegraphics`; ao copiar, ficam como um quadro cinza. As linhas que o LaTeX precisa no preâmbulo vêm comentadas no começo do arquivo
 - **Posição e "Ir para"**: o rodapé mostra a posição do cursor na cena (X, Y, as mesmas coordenadas do `.excalidraw`). Clicar nela, ou `Alt+G`, abre "Ir para posição": digite X e Y (ou cole "120, -45" no X) e a tela centraliza nesse ponto, sem mudar o zoom
 - **Conforto**: tema escuro, grade com encaixe, zoom no cursor, salvamento automático (o desenho volta ao reabrir), arrastar arquivo para a janela
 
@@ -58,6 +59,7 @@ No Linux, para compilar: `sudo apt install libxkbcommon-dev libgl1-mesa-dev` (De
 ```bash
 rustdraw export entrada.excalidraw saida.png --scale 2
 rustdraw export entrada.excalidraw saida.svg --dark --no-bg
+rustdraw export entrada.excalidraw figura.tex                    # TikZ para LaTeX
 rustdraw export slides.excalidraw tela1.png --frame "Tela 1"   # só um frame
 rustdraw icon rustdraw.png --size 512                           # ícone do app
 ```
@@ -105,7 +107,7 @@ Para editar arquivos sem o editor aberto, use o `rustdraw mcp` também no Claude
 | `add_elements` | Adiciona formas, textos, linhas, setas e imagens em lote; setas ligam em formas pelo id (`start`/`end`), formas aceitam um rótulo (`label`), `{"type": "note", "label": "..."}` cria uma nota adesiva e imagens vêm de um arquivo (`{"type": "image", "path": "print.png"}`) |
 | `update_elements` | Muda posição, tamanho, estilo ou texto; setas ligadas e rótulos acompanham |
 | `delete_elements` | Apaga elementos e solta as setas ligadas a eles |
-| `export_image` | Grava PNG ou SVG (do desenho todo ou de um frame, em `frame`) |
+| `export_image` | Grava PNG, SVG ou TikZ (`.tex`), do desenho todo ou de um frame, em `frame` |
 | `preview` | Devolve um PNG do desenho (ou de um frame) para o assistente conferir o resultado |
 
 ### Editar o desenho aberto no editor
@@ -160,6 +162,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/snap.rs` | Encaixe em objetos: pontos de referência, deslocamento e guias |
 | `src/render.rs` | Desenho das primitivas no canvas (egui) |
 | `src/export.rs` | PNG (tiny-skia + fontdue) e SVG |
+| `src/tikz.rs` | TikZ (LaTeX): formas, setas e textos em comandos do TikZ, com traço limpo |
 | `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, histórico, arquivos |
 | `src/library.rs` | Biblioteca de formas no formato `.excalidrawlib` |
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |

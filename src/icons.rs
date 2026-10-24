@@ -37,6 +37,7 @@ pub enum Icon {
     Save,
     ExportPng,
     ExportSvg,
+    ExportTikz,
     Moon,
     Grid,
     SendToBack,
@@ -196,6 +197,13 @@ impl Icon {
                 "M4.6 18.6 C6.2 11 11.6 6.6 19.2 5.6 M4.6 18.6 L10.8 7.8",
                 "M3 17 h3.2 v3.2 h-3.2 z M17.6 4 h3.2 v3.2 h-3.2 z \
                  M9.5 7.8 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0",
+            ),
+            // provisório, até o desenho do design: "{\}" do LaTeX
+            Icon::ExportTikz => (
+                "M9 4.2 C7.4 4.2 7 5 7 6.6 V9.8 C7 11.2 6.2 12 5 12 C6.2 12 7 12.8 7 14.2 V17.4 \
+                 C7 19 7.4 19.8 9 19.8 M15 4.2 C16.6 4.2 17 5 17 6.6 V9.8 C17 11.2 17.8 12 19 12 \
+                 C17.8 12 17 12.8 17 14.2 V17.4 C17 19 16.6 19.8 15 19.8 M10.4 8.2 L13.6 15.8",
+                "",
             ),
             Icon::Moon => (
                 "M19.6 14.6 C18.4 15.2 17 15.6 15.6 15.6 C11.4 15.6 8.2 12.4 8.2 8.2 \
@@ -840,6 +848,7 @@ mod tests {
             Icon::Save,
             Icon::ExportPng,
             Icon::ExportSvg,
+            Icon::ExportTikz,
             Icon::Moon,
             Icon::Grid,
             Icon::SendToBack,

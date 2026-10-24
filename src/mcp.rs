@@ -379,22 +379,16 @@ fn export_image(args: &Map<String, Value>, scene: &SceneFile) -> Result<Value, S
     let output = args
         .get("output")
         .and_then(|v| v.as_str())
-        .ok_or("falta `output` (caminho .png ou .svg)")?;
+        .ok_or("falta `output` (caminho .png, .svg ou .tex)")?;
     let opts = opts(scene, args, 2.0);
-    let lower = output.to_lowercase();
-    let data = if lower.ends_with(".svg") {
-        export::render_svg(&scene.elements, &opts)?.into_bytes()
-    } else if lower.ends_with(".png") {
-        export::render_png(&scene.elements, &opts)?
-    } else {
-        return Err("`output` precisa terminar em .png ou .svg".into());
-    };
+    let format = export::Format::from_path(output)
+        .ok_or("`output` precisa terminar em .png, .svg, .tex ou .tikz")?;
     let out = Path::new(output);
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    std::fs::write(out, &data).map_err(|e| format!("{output}: {e}"))?;
-    Ok(json!({"written": output, "bytes": data.len()}))
+    let bytes = export::write_file(out, format, &scene.elements, &opts)?;
+    Ok(json!({"written": output, "bytes": bytes}))
 }
 
 fn preview(args: &Map<String, Value>, scene: &SceneFile) -> Result<Value, String> {
@@ -521,10 +515,10 @@ fn tools() -> Value {
         },
         {
             "name": "export_image",
-            "description": "Exporta o desenho para PNG ou SVG (pela extensão de `output`).",
+            "description": "Exporta o desenho para PNG, SVG ou TikZ/LaTeX (pela extensão de `output`; o TikZ grava as imagens numa pasta ao lado).",
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
-                "output": {"type": "string", "description": "Caminho de saída .png ou .svg."},
+                "output": {"type": "string", "description": "Caminho de saída .png, .svg ou .tex (TikZ)."},
                 "scale": {"type": "number", "description": "Escala do PNG, padrão 2."},
                 "dark": {"type": "boolean", "description": "Modo escuro."},
                 "background": {"type": "boolean", "description": "Com fundo (padrão true)."},

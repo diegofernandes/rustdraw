@@ -2,7 +2,7 @@
 //!
 //! Uso:
 //!   rustdraw [arquivo.excalidraw]
-//!   rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg] [--frame NOME]
+//!   rustdraw export <entrada.excalidraw> <saida.png|saida.svg|saida.tex> [--scale N] [--dark] [--no-bg] [--frame NOME]
 //!   rustdraw mcp [arquivo.excalidraw]
 //!   rustdraw icon <saida.png> [--size N] [--margin F]
 
@@ -30,6 +30,7 @@ mod note;
 mod render;
 mod rough;
 mod snap;
+mod tikz;
 mod ui;
 mod watch;
 
@@ -69,7 +70,7 @@ fn usage() -> ! {
     eprintln!(
         "RustDraw {}\n\n\
          Uso:\n  rustdraw [arquivo.excalidraw]\n  \
-         rustdraw export <entrada.excalidraw> <saida.png|saida.svg> [--scale N] [--dark] [--no-bg] [--frame NOME]\n  \
+         rustdraw export <entrada.excalidraw> <saida.png|saida.svg|saida.tex> [--scale N] [--dark] [--no-bg] [--frame NOME]\n  \
          rustdraw mcp [arquivo.excalidraw]   (servidor MCP por stdio)\n  \
          rustdraw icon <saida.png> [--size N] [--margin F]   (ícone do app)",
         env!("CARGO_PKG_VERSION")
@@ -110,13 +111,8 @@ fn cli_export(args: &[String]) -> Result<(), String> {
         );
     }
     opts.files = scene.files_map();
-    if output.to_lowercase().ends_with(".svg") {
-        std::fs::write(output, export::render_svg(&scene.elements, &opts)?)
-            .map_err(|e| e.to_string())?;
-    } else {
-        std::fs::write(output, export::render_png(&scene.elements, &opts)?)
-            .map_err(|e| e.to_string())?;
-    }
+    let format = export::Format::from_path(output).unwrap_or(export::Format::Png);
+    export::write_file(std::path::Path::new(output), format, &scene.elements, &opts)?;
     println!("{output} ({} elementos)", scene.elements.len());
     Ok(())
 }
