@@ -1,4 +1,5 @@
-//! Exportação da cena para PNG (tiny-skia + fontdue) e SVG.
+//! Exportação da cena para PNG (tiny-skia + fontdue) e SVG. O TikZ fica em
+//! `tikz.rs`, a partir do mesmo plano.
 
 use crate::fonts::{self, Family};
 use crate::frame;
@@ -39,7 +40,71 @@ impl Default for ExportOpts {
     }
 }
 
-fn map_color(c: Rgba, dark: bool) -> Rgba {
+/// Formato do arquivo exportado.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Png,
+    Svg,
+    Tikz,
+}
+
+impl Format {
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Svg => "svg",
+            Format::Tikz => "tex",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Format::Png => "PNG",
+            Format::Svg => "SVG",
+            Format::Tikz => "TikZ",
+        }
+    }
+
+    /// Extensões aceitas na caixa de salvar.
+    pub fn exts(self) -> &'static [&'static str] {
+        match self {
+            Format::Png => &["png"],
+            Format::Svg => &["svg"],
+            Format::Tikz => &["tex", "tikz"],
+        }
+    }
+
+    /// Pela extensão do caminho: .png, .svg, .tex ou .tikz.
+    pub fn from_path(path: &str) -> Option<Self> {
+        let ext = std::path::Path::new(path).extension()?.to_str()?;
+        Some(match ext.to_ascii_lowercase().as_str() {
+            "png" => Format::Png,
+            "svg" => Format::Svg,
+            "tex" | "tikz" => Format::Tikz,
+            _ => return None,
+        })
+    }
+}
+
+/// Grava a exportação em `path`. O TikZ grava também as imagens, numa pasta
+/// ao lado do `.tex`.
+pub fn write_file(
+    path: &std::path::Path,
+    format: Format,
+    els: &[Element],
+    opts: &ExportOpts,
+) -> Result<usize, String> {
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let data = match format {
+        Format::Png => render_png(els, opts)?,
+        Format::Svg => render_svg(els, opts)?.into_bytes(),
+        Format::Tikz => return crate::tikz::write_file(path, els, opts),
+    };
+    std::fs::write(path, &data).map_err(err)?;
+    Ok(data.len())
+}
+
+pub(crate) fn map_color(c: Rgba, dark: bool) -> Rgba {
     if dark { dark_filter(c) } else { c }
 }
 
@@ -54,17 +119,17 @@ fn element_bounds(e: &Element) -> Option<Rect> {
 
 /// O que desenhar, em ordem: as primitivas de um elemento e o recorte do
 /// frame dele (`clip` = id do frame).
-struct Item<'a> {
-    id: &'a str,
-    prims: Vec<Prim>,
-    clip: Option<&'a str>,
+pub(crate) struct Item<'a> {
+    pub id: &'a str,
+    pub prims: Vec<Prim>,
+    pub clip: Option<&'a str>,
 }
 
-struct Plan<'a> {
-    bounds: Rect,
-    padding: f32,
-    items: Vec<Item<'a>>,
-    clips: HashMap<&'a str, Rect>,
+pub(crate) struct Plan<'a> {
+    pub bounds: Rect,
+    pub padding: f32,
+    pub items: Vec<Item<'a>>,
+    pub clips: HashMap<&'a str, Rect>,
 }
 
 /// Nome do frame, acima da borda de cima.
@@ -87,7 +152,7 @@ fn frame_name_prim(f: &Element) -> Prim {
 
 /// Monta a exportação: a cena inteira (frames com borda e nome, filhos
 /// recortados) ou, com `opts.frame`, só o conteúdo de um frame, sem margem.
-fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>, String> {
+pub(crate) fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>, String> {
     let clips = frame::rects(els);
     if let Some(fid) = &opts.frame {
         let (&id, &r) = clips
