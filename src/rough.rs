@@ -269,12 +269,20 @@ fn ellipse_points(
     pts
 }
 
+/// Máximo de passos no contorno de uma elipse (uma de 800 mil px de raio).
+const MAX_ELLIPSE_STEPS: f32 = 1440.0;
+
 /// Elipse irregular centrada em `c` com largura `w` e altura `h`.
 pub fn ellipse(c: P, w: f32, h: f32, o: &Opts, rng: &mut Rng) -> Vec<Vec<P>> {
     let mut rx = (w / 2.0).abs();
     let mut ry = (h / 2.0).abs();
     let psq = (2.0 * PI * ((rx * rx + ry * ry) / 2.0).sqrt()).sqrt();
-    let steps = (9.0f32).max((9.0 / 200f32.sqrt()) * psq).ceil();
+    // com teto: numa elipse gigante o passo ficaria menor que a precisão do
+    // ângulo e o laço de `ellipse_points` não terminaria
+    let steps = (9.0f32)
+        .max((9.0 / 200f32.sqrt()) * psq)
+        .ceil()
+        .min(MAX_ELLIPSE_STEPS);
     let inc = 2.0 * PI / steps;
     rx += offset_opt(rx * 0.05, o, rng, 1.0);
     ry += offset_opt(ry * 0.05, o, rng, 1.0);
@@ -287,6 +295,10 @@ pub fn ellipse(c: P, w: f32, h: f32, o: &Opts, rng: &mut Rng) -> Vec<Vec<P>> {
     }
     out
 }
+
+/// Máximo de linhas de hachura por forma e por ângulo. Uma forma que pediria
+/// mais (dezenas de milhares de px de altura) ganha um espaço maior entre elas.
+const MAX_HACHURE_LINES: usize = 4000;
 
 /// Linhas de hachura dentro de um polígono (pares de pontos), no ângulo dado (graus).
 pub fn hachure(polygon: &[P], gap: f32, angle_deg: f32) -> Vec<(P, P)> {
@@ -305,10 +317,21 @@ pub fn hachure(polygon: &[P], gap: f32, angle_deg: f32) -> Vec<(P, P)> {
         miny = miny.min(p.y);
         maxy = maxy.max(p.y);
     }
+    let span = maxy - miny;
+    if !span.is_finite() || span <= 0.0 {
+        return vec![];
+    }
+    // as linhas são contadas, e não somadas num `while y < maxy`: longe da
+    // origem (1e9) somar o espaço não muda mais um f32 e o laço não terminaria
+    let gap = gap.max(span / MAX_HACHURE_LINES as f32);
+    let count = ((span / gap).ceil() as usize).min(MAX_HACHURE_LINES);
     let mut lines = Vec::new();
-    let mut y = miny + gap / 2.0;
     let n = rot.len();
-    while y < maxy {
+    for k in 0..count {
+        let y = miny + gap * (k as f32 + 0.5);
+        if y >= maxy {
+            break;
+        }
         let mut xs: Vec<f32> = Vec::new();
         for i in 0..n {
             let p1 = rot[i];
@@ -325,7 +348,6 @@ pub fn hachure(polygon: &[P], gap: f32, angle_deg: f32) -> Vec<(P, P)> {
                 lines.push((un(pair[0]), un(pair[1])));
             }
         }
-        y += gap;
     }
     lines
 }
@@ -341,6 +363,43 @@ mod tests {
         let b = line(P::new(0.0, 0.0), P::new(100.0, 0.0), &o, &mut Rng::new(7));
         assert_eq!(a, b);
         assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn hachure_far_away_or_huge_does_not_hang() {
+        let square = |at: f32, side: f32| {
+            [
+                P::new(at, at),
+                P::new(at + side, at),
+                P::new(at + side, at + side),
+                P::new(at, at + side),
+            ]
+        };
+        // antes: em 1e9, somar o espaço de 4 px não mudava o f32 e o laço
+        // enchia a memória
+        for at in [1e7, 1e9, 1e20, 1e30] {
+            let l = hachure(&square(at, 100.0), 4.0, -41.0);
+            assert!(l.len() <= MAX_HACHURE_LINES, "{at}: {}", l.len());
+        }
+        for side in [1e6, 1e9, 1e20, f32::MAX, f32::INFINITY] {
+            let l = hachure(&square(0.0, side), 4.0, -41.0);
+            assert!(l.len() <= MAX_HACHURE_LINES, "{side}: {}", l.len());
+        }
+        // uma forma comum continua com as linhas a cada `gap`
+        assert_eq!(hachure(&square(0.0, 100.0), 10.0, 0.0).len(), 10);
+    }
+
+    #[test]
+    fn huge_ellipse_does_not_hang() {
+        // antes: o passo do ângulo ficava menor que a precisão do f32
+        for w in [1e7, 1e16, 1e30, f32::MAX] {
+            for rough in [0.0, 1.0] {
+                let o = Opts::new(rough, true);
+                let lines = ellipse(P::new(0.0, 0.0), w, w, &o, &mut Rng::new(1));
+                let n: usize = lines.iter().map(Vec::len).sum();
+                assert!(n < 100_000, "{w}: {n}");
+            }
+        }
     }
 
     #[test]
