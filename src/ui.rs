@@ -2124,6 +2124,7 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
     live_chip(app, ctx);
     live_window(app, ctx);
     live_approval(app, ctx);
+    live_file_approval(app, ctx);
     context_menu(app, ctx);
     toast(app, ctx);
 }
@@ -2254,6 +2255,14 @@ fn live_approval(app: &mut App, ctx: &egui::Context) {
                 ))
                 .weak(),
             );
+            ui.label(
+                RichText::new(format!(
+                    "\"Sempre permitir\" vale para qualquer programa com a chave que se \
+                     apresente como {client}. Para ler ou gravar arquivos do disco o editor \
+                     pergunta de novo."
+                ))
+                .weak(),
+            );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Permitir").clicked() {
@@ -2264,6 +2273,79 @@ fn live_approval(app: &mut App, ctx: &egui::Context) {
                 }
                 if ui.button("Recusar").clicked() {
                     app.live_answer(&id, false, false);
+                }
+            });
+        });
+}
+
+/// Quantos caminhos a pergunta de arquivos mostra antes de resumir.
+const FILE_ASK_LINES: usize = 6;
+
+/// Pergunta se um assistente já aceito pode ler ou gravar arquivos do disco
+/// (exportar uma imagem, pôr uma imagem no desenho).
+fn live_file_approval(app: &mut App, ctx: &egui::Context) {
+    // uma pergunta de cada vez: primeiro quem ainda nem foi aceito
+    if app.live_sessions.pending().is_some() {
+        return;
+    }
+    let Some(s) = app.live_sessions.pending_files() else {
+        return;
+    };
+    let Some(ask) = &s.file_ask else { return };
+    let (id, client, uses) = (s.id.clone(), s.client.clone(), ask.uses.clone());
+    egui::Window::new("Permitir arquivos do disco?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            for write in [true, false] {
+                let paths: Vec<&str> = uses
+                    .iter()
+                    .filter(|u| u.write == write)
+                    .map(|u| u.path.as_str())
+                    .collect();
+                if paths.is_empty() {
+                    continue;
+                }
+                ui.label(if write {
+                    format!("{client} quer gravar este arquivo (se já existir, ele é trocado):")
+                } else if paths.len() == 1 {
+                    format!("{client} quer ler esta imagem e pôr no desenho:")
+                } else {
+                    format!("{client} quer ler estas imagens e pôr no desenho:")
+                });
+                for p in paths.iter().take(FILE_ASK_LINES) {
+                    ui.add(egui::Label::new(RichText::new(*p).monospace()).wrap());
+                }
+                if paths.len() > FILE_ASK_LINES {
+                    ui.label(format!("e mais {}", paths.len() - FILE_ASK_LINES));
+                }
+                if write
+                    && paths
+                        .iter()
+                        .any(|p| p.ends_with(".tex") || p.ends_with(".tikz"))
+                {
+                    ui.label(
+                        RichText::new(
+                            "As imagens do desenho vão para uma pasta ao lado do arquivo.",
+                        )
+                        .weak(),
+                    );
+                }
+                ui.add_space(4.0);
+            }
+            ui.label(RichText::new("Arquivos gravados não se desfazem com o editor.").weak());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Permitir").clicked() {
+                    app.live_answer_files(&id, true, false);
+                }
+                if ui.button("Permitir arquivos até fechar o editor").clicked() {
+                    app.live_answer_files(&id, true, true);
+                }
+                if ui.button("Recusar").clicked() {
+                    app.live_answer_files(&id, false, false);
                 }
             });
         });
@@ -2382,10 +2464,11 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     for s in &app.live_sessions.list {
                         ui.label(&s.client);
-                        ui.label(match s.allowed {
-                            Some(true) => "permitido",
-                            Some(false) => "recusado",
-                            None => "esperando",
+                        ui.label(match (s.allowed, s.files) {
+                            (Some(true), true) => "permitido, com arquivos",
+                            (Some(true), false) => "permitido",
+                            (Some(false), _) => "recusado",
+                            (None, _) => "esperando",
                         });
                         let (label, allow) = if s.allowed == Some(true) {
                             ("Revogar", false)

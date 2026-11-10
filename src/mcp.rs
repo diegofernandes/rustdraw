@@ -318,6 +318,40 @@ fn new_scene_file(args: &Map<String, Value>, path: &Path) -> Result<Value, Strin
     Ok(json!({"created": path.display().to_string()}))
 }
 
+/// Arquivos do disco que a chamada leria ou gravaria: a saída do
+/// `export_image` e o `path` das imagens do `add_elements`. O editor pergunta
+/// ao usuário antes de atender uma chamada assim.
+pub fn file_uses(name: &str, args: &Map<String, Value>) -> Vec<live::FileUse> {
+    let abs = |p: &str| {
+        std::path::absolute(p)
+            .map(|a| a.display().to_string())
+            .unwrap_or_else(|_| p.to_string())
+    };
+    match name {
+        "export_image" => args
+            .get("output")
+            .and_then(|v| v.as_str())
+            .map(|p| live::FileUse {
+                write: true,
+                path: abs(p),
+            })
+            .into_iter()
+            .collect(),
+        "add_elements" => args
+            .get("elements")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.get("path")?.as_str())
+            .map(|p| live::FileUse {
+                write: false,
+                path: abs(p),
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// Executa uma ferramenta sobre uma cena em memória (de um arquivo ou do editor
 /// aberto). Devolve o resultado do `tools/call` e se a cena mudou; num erro a
 /// cena fica como estava. `source` diz de onde a cena veio; `selected` é a
@@ -858,6 +892,41 @@ mod tests {
         assert!(err(&r).contains("não é um desenho do Excalidraw"), "{r}");
         assert_eq!(std::fs::read_to_string(&json_file).unwrap(), pkg);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calls_say_which_files_they_touch() {
+        let uses = |tool: &str, args: Value| file_uses(tool, args.as_object().unwrap());
+        let out = uses("export_image", json!({"output": "/tmp/a.png"}));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].write && out[0].path == "/tmp/a.png");
+        // caminho relativo: aparece inteiro para o usuário
+        let rel = uses("export_image", json!({"output": "a.png"}));
+        assert!(Path::new(&rel[0].path).is_absolute(), "{rel:?}");
+        let read = uses(
+            "add_elements",
+            json!({"elements": [
+                {"type": "rectangle"},
+                {"type": "image", "path": "/tmp/foto.jpg"},
+                {"type": "image", "fileId": "abc"}
+            ]}),
+        );
+        assert_eq!(read.len(), 1);
+        assert!(!read[0].write && read[0].path == "/tmp/foto.jpg");
+        // o resto só mexe no desenho
+        for (tool, args) in [
+            ("get_scene", json!({})),
+            ("preview", json!({})),
+            ("add_elements", json!({"elements": [{"type": "text"}]})),
+            (
+                "update_elements",
+                json!({"elements": [{"id": "a", "path": "/x"}]}),
+            ),
+            ("delete_elements", json!({"ids": ["a"]})),
+            ("new_scene", json!({})),
+        ] {
+            assert!(uses(tool, args).is_empty(), "{tool}");
+        }
     }
 
     #[test]
