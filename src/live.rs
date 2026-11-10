@@ -215,11 +215,14 @@ struct Slot(Arc<AtomicUsize>);
 
 impl Slot {
     fn take(open: &Arc<AtomicUsize>) -> Option<Slot> {
-        open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-            (n < MAX_CONNECTIONS).then_some(n + 1)
-        })
-        .ok()
-        .map(|_| Slot(open.clone()))
+        let mut n = open.load(Ordering::SeqCst);
+        while n < MAX_CONNECTIONS {
+            match open.compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(Slot(open.clone())),
+                Err(now) => n = now,
+            }
+        }
+        None
     }
 }
 

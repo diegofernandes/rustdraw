@@ -897,9 +897,13 @@ mod tests {
     #[test]
     fn calls_say_which_files_they_touch() {
         let uses = |tool: &str, args: Value| file_uses(tool, args.as_object().unwrap());
-        let out = uses("export_image", json!({"output": "/tmp/a.png"}));
+        // inteiro em qualquer sistema: no Windows "/tmp/a.png" não tem unidade
+        let dir = std::env::temp_dir();
+        let png = dir.join("a.png").display().to_string();
+        let jpg = dir.join("foto.jpg").display().to_string();
+        let out = uses("export_image", json!({"output": png}));
         assert_eq!(out.len(), 1);
-        assert!(out[0].write && out[0].path == "/tmp/a.png");
+        assert!(out[0].write && out[0].path == png, "{out:?}");
         // caminho relativo: aparece inteiro para o usuário
         let rel = uses("export_image", json!({"output": "a.png"}));
         assert!(Path::new(&rel[0].path).is_absolute(), "{rel:?}");
@@ -907,12 +911,12 @@ mod tests {
             "add_elements",
             json!({"elements": [
                 {"type": "rectangle"},
-                {"type": "image", "path": "/tmp/foto.jpg"},
+                {"type": "image", "path": jpg},
                 {"type": "image", "fileId": "abc"}
             ]}),
         );
         assert_eq!(read.len(), 1);
-        assert!(!read[0].write && read[0].path == "/tmp/foto.jpg");
+        assert!(!read[0].write && read[0].path == jpg, "{read:?}");
         // o resto só mexe no desenho
         for (tool, args) in [
             ("get_scene", json!({})),
