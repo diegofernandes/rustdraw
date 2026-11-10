@@ -43,18 +43,31 @@ pub fn font_family(fam: i64, hand_ok: bool) -> FontFamily {
     }
 }
 
+/// Máximo de traços de uma linha tracejada. Uma linha que pediria mais
+/// (centenas de milhares de px na tela) ganha traços mais longos.
+const MAX_DASHES: usize = 20_000;
+
 fn dash_split(pts: &[Pos2], on: f32, off: f32) -> Vec<Vec<Pos2>> {
     let mut out = Vec::new();
     if pts.len() < 2 || on <= 0.0 {
         return out;
     }
+    let off = off.max(0.1);
+    // com teto: numa linha enorme (1e9 px) descontar um traço de poucos px
+    // não muda mais um f32 e o laço abaixo não terminaria
+    let total: f32 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+    let k = (total / (on + off) / MAX_DASHES as f32).max(1.0);
+    if !k.is_finite() {
+        return out;
+    }
+    let (on, off) = (on * k, off * k);
     let mut cur = vec![pts[0]];
     let mut drawing = true;
     let mut remain = on;
     for w in pts.windows(2) {
         let (mut a, b) = (w[0], w[1]);
         let mut seg = (b - a).length();
-        while seg > remain {
+        while seg > remain && out.len() <= 2 * MAX_DASHES {
             let m = a + (b - a) * (remain / seg);
             if drawing {
                 cur.push(m);
@@ -64,7 +77,7 @@ fn dash_split(pts: &[Pos2], on: f32, off: f32) -> Vec<Vec<Pos2>> {
             }
             seg -= remain;
             drawing = !drawing;
-            remain = if drawing { on } else { off.max(0.1) };
+            remain = if drawing { on } else { off };
             a = m;
         }
         remain -= seg;
@@ -185,18 +198,20 @@ pub fn paint_prims(pc: &PaintCtx, prims: &[Prim]) {
                 center,
             } => {
                 let px = size * z;
-                if px < 1.0 {
+                if px < 1.0 || !px.is_finite() {
                     continue;
                 }
-                let font = FontId::new(px, font_family(*family, pc.hand_ok));
+                // fonte grande demais para o egui: monta menor e amplia
+                let (fpx, k) = capped_font(px);
+                let font = FontId::new(fpx, font_family(*family, pc.hand_ok));
                 let col = c32(*color, pc.dark, pc.alpha);
                 let lh = size * line_height;
                 for (i, line) in text.split('\n').enumerate() {
                     let galley = pc
                         .painter
                         .layout_no_wrap(line.to_string(), font.clone(), col);
-                    let gw = galley.size().x / z;
-                    let gh = galley.size().y / z;
+                    let gw = galley.size().x * k / z;
+                    let gh = galley.size().y * k / z;
                     let dx = match align {
                         1 => (width - gw) / 2.0,
                         2 => width - gw,
@@ -205,11 +220,35 @@ pub fn paint_prims(pc: &PaintCtx, prims: &[Prim]) {
                     let top_left =
                         P::new(origin.x + dx, origin.y + i as f32 * lh + (lh - gh) / 2.0);
                     let pos = pc.cam.s(rotate(top_left, *center, *angle));
-                    pc.painter
-                        .add(TextShape::new(pos, galley, col).with_angle(*angle));
+                    if k == 1.0 {
+                        pc.painter
+                            .add(TextShape::new(pos, galley, col).with_angle(*angle));
+                    } else {
+                        let at = (pos.to_vec2() / k).to_pos2();
+                        let mut shape = TextShape::new(at, galley, col).with_angle(*angle);
+                        shape.transform(egui::emath::TSTransform::from_scaling(k));
+                        pc.painter.add(shape);
+                    }
                 }
             }
         }
+    }
+}
+
+/// Maior fonte (em px) pedida ao egui. Ele guarda cada letra desenhada no
+/// tamanho pedido, e um `fontSize` de 100000 pediria 16 GB; acima deste
+/// tamanho o texto é montado nele e ampliado (ou medido nele e a medida,
+/// multiplicada).
+pub const MAX_FONT_PX: f32 = 1024.0;
+
+/// Tamanho a pedir ao egui e o fator que leva dele ao tamanho real.
+pub fn capped_font(px: f32) -> (f32, f32) {
+    if !px.is_finite() {
+        (MAX_FONT_PX, 1.0)
+    } else if px > MAX_FONT_PX {
+        (MAX_FONT_PX, px / MAX_FONT_PX)
+    } else {
+        (px, 1.0)
     }
 }
 
@@ -220,11 +259,13 @@ pub type TextFont = (f32, i64, bool);
 
 /// Largura de uma linha de texto.
 pub fn text_width(painter: &Painter, line: &str, (size, fam, hand_ok): TextFont) -> f64 {
+    let (size, k) = capped_font(size);
     let font = FontId::new(size, font_family(fam, hand_ok));
-    painter
+    (painter
         .layout_no_wrap(line.to_string(), font, Color32::BLACK)
         .size()
-        .x as f64
+        .x
+        * k) as f64
 }
 
 /// `text` com quebras de linha onde o egui quebraria na largura `max`.
@@ -234,8 +275,9 @@ pub fn wrap_text(
     (size, fam, hand_ok): TextFont,
     max: f32,
 ) -> String {
+    let (size, k) = capped_font(size);
     let font = FontId::new(size, font_family(fam, hand_ok));
-    let galley = painter.layout(text.to_string(), font, Color32::BLACK, max.max(1.0));
+    let galley = painter.layout(text.to_string(), font, Color32::BLACK, (max / k).max(1.0));
     let n = galley.rows.len();
     let mut out = String::with_capacity(text.len() + n);
     for (i, row) in galley.rows.iter().enumerate() {
@@ -258,13 +300,56 @@ pub fn measure_text(
     lh: f32,
     hand_ok: bool,
 ) -> (f32, f32) {
-    let font = FontId::new(size, font_family(fam, hand_ok));
+    let (fpx, k) = capped_font(size);
+    let font = FontId::new(fpx, font_family(fam, hand_ok));
     let mut w: f32 = 0.0;
     let mut n = 0;
     for line in text.split('\n') {
         let g = painter.layout_no_wrap(line.to_string(), font.clone(), Color32::BLACK);
-        w = w.max(g.size().x);
+        w = w.max(g.size().x * k);
         n += 1;
     }
     (w.max(1.0), (n as f32 * size * lh).max(size * lh))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashes_are_split_and_a_huge_line_does_not_hang() {
+        let line = |len: f32| [Pos2::new(0.0, 0.0), Pos2::new(len, 0.0)];
+        // 100 px com traço de 8 e espaço de 12: 5 traços, o último de 80 a 88
+        let d = dash_split(&line(100.0), 8.0, 12.0);
+        assert_eq!(d.len(), 5);
+        assert_eq!((d[4][0].x, d[4][1].x), (80.0, 88.0));
+        // antes: em 1e9 px, descontar 8 não mudava o f32 e o laço não terminava
+        for len in [1e9, 1e30, f32::MAX, f32::INFINITY] {
+            let d = dash_split(&line(len), 8.0, 12.0);
+            assert!(d.len() <= MAX_DASHES + 1, "{len}: {}", d.len());
+        }
+        let far = [Pos2::new(1e9, 1e9), Pos2::new(1e9 + 100.0, 1e9)];
+        assert!(dash_split(&far, 1.5, 6.0).len() <= 20);
+    }
+
+    #[test]
+    fn huge_fonts_are_asked_smaller_and_scaled() {
+        assert_eq!(capped_font(20.0), (20.0, 1.0));
+        assert_eq!(capped_font(MAX_FONT_PX * 4.0), (MAX_FONT_PX, 4.0));
+        assert_eq!(capped_font(f32::INFINITY), (MAX_FONT_PX, 1.0));
+        // a medida continua a do tamanho real
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            let small = measure_text(ui.painter(), "oi", 100.0, 2, 1.25, false);
+            let huge = measure_text(ui.painter(), "oi", 100_000.0, 2, 1.25, false);
+            assert!(
+                (huge.0 / small.0 - 1000.0).abs() < 20.0,
+                "{small:?} {huge:?}"
+            );
+            assert_eq!(huge.1, 125_000.0);
+            let w = text_width(ui.painter(), "oi", (100_000.0, 2, false));
+            assert!((w as f32 - huge.0).abs() < 1.0);
+        });
+        out.textures_delta.clear();
+    }
 }

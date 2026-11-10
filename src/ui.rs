@@ -1586,7 +1586,8 @@ fn text_editor(app: &mut App, ctx: &egui::Context) {
     };
     let z = app.cam.zoom;
     let pos = app.cam.s(crate::geom::P::new(el.x as f32, el.y as f32));
-    let size = el.font_size() as f32 * z;
+    // acima do teto o texto é editado menor do que aparece no canvas
+    let (size, _) = render::capped_font(el.font_size() as f32 * z);
     let font = FontId::new(size, render::font_family(el.font_family(), app.hand_ok));
     let color = parse_color(&el.stroke_color)
         .map(|c| render::c32(c, app.dark, 1.0))

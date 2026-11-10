@@ -468,6 +468,9 @@ fn parse_point(s: &str) -> Option<(f32, f32)> {
     Some((parse_coord(x)?, parse_coord(y)?))
 }
 
+/// Máximo de linhas da grade por direção (no menor zoom uma tela 8K pede ~800).
+const MAX_GRID_LINES: usize = 2000;
+
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / GRID).round() * GRID } else { v }
 }
@@ -4424,8 +4427,12 @@ impl App {
             } else {
                 Color32::from_gray(222)
             };
-            let mut x = (tl.x / step).floor() * step;
-            while x <= br.x {
+            // contadas, e não somadas num `while x <= br.x`: longe da origem
+            // (1e9) somar o passo não muda mais um f32 e o laço não terminaria
+            let count = |from: f32, to: f32| (((to - from) / step) as usize).min(MAX_GRID_LINES);
+            let x0 = (tl.x / step).floor() * step;
+            for i in 0..=count(x0, br.x) {
+                let x = x0 + i as f32 * step;
                 let bold = (x / (step * 5.0)).fract().abs() < 1e-3;
                 let sx = self.cam.s(P::new(x, 0.0)).x;
                 painter.vline(
@@ -4433,10 +4440,10 @@ impl App {
                     rect.y_range(),
                     Stroke::new(1.0, if bold { bold_col } else { line_col }),
                 );
-                x += step;
             }
-            let mut y = (tl.y / step).floor() * step;
-            while y <= br.y {
+            let y0 = (tl.y / step).floor() * step;
+            for i in 0..=count(y0, br.y) {
+                let y = y0 + i as f32 * step;
                 let bold = (y / (step * 5.0)).fract().abs() < 1e-3;
                 let sy = self.cam.s(P::new(0.0, y)).y;
                 painter.hline(
@@ -4444,7 +4451,6 @@ impl App {
                     sy,
                     Stroke::new(1.0, if bold { bold_col } else { line_col }),
                 );
-                y += step;
             }
         }
 
@@ -5056,6 +5062,52 @@ mod tests {
         let mut app = App::empty(egui::Context::default(), Some(saved.into()), vec![]);
         app.start(open);
         app
+    }
+
+    /// Pinta um quadro do canvas sem janela e devolve quantas formas saíram.
+    fn paint(app: &mut App) -> usize {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = app.ctx.clone().run_ui(input, |ui| {
+            let (rect, _) = app.begin_canvas(ui);
+            app.paint_canvas(ui, rect);
+        });
+        // sem janela, as texturas das letras não vão para lugar nenhum
+        out.textures_delta.clear();
+        out.shapes.len()
+    }
+
+    #[test]
+    fn hostile_drawings_do_not_hang_the_canvas() {
+        // cada um destes fechava o editor por falta de memória ao abrir
+        let cases = [
+            // hachura longe da origem
+            r##"{"elements":[{"id":"e","type":"rectangle","x":1e9,"y":1e9,"width":100,"height":100,"backgroundColor":"#00f","fillStyle":"hachure"}]}"##,
+            // grade ligada com a câmera longe da origem
+            r##"{"elements":[{"id":"e","type":"rectangle","x":1e9,"y":1e9,"width":100,"height":100}],"appState":{"gridModeEnabled":true}}"##,
+            // tracejado enorme
+            r##"{"elements":[{"id":"e","type":"rectangle","x":0,"y":0,"width":1e9,"height":100,"strokeStyle":"dashed"},{"id":"f","type":"rectangle","x":0,"y":0,"width":100,"height":100}]}"##,
+            // texto com fonte enorme
+            r##"{"elements":[{"id":"e","type":"text","x":0,"y":0,"width":300,"height":200,"text":"oi","fontSize":100000},{"id":"f","type":"rectangle","x":0,"y":0,"width":100,"height":100}]}"##,
+            // elipse e hachura gigantes
+            r##"{"elements":[{"id":"e","type":"ellipse","x":0,"y":0,"width":1e16,"height":1e16,"backgroundColor":"#00f","fillStyle":"cross-hatch","strokeStyle":"dotted"}],"appState":{"gridModeEnabled":true}}"##,
+        ];
+        let dir = tmp_dir();
+        for json in cases {
+            let mut app = app_with(&dir.join("autosave.excalidraw"), None);
+            app.apply_scene(SceneFile::parse(json).unwrap());
+            // o primeiro quadro enquadra o desenho; o segundo já pinta enquadrado
+            for _ in 0..2 {
+                let shapes = paint(&mut app);
+                assert!(shapes < 200_000, "{shapes} formas em {json}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
