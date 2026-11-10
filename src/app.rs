@@ -1287,6 +1287,9 @@ impl App {
             return;
         }
         if on {
+            if self.live_token.is_empty() {
+                self.live_token = live::new_token();
+            }
             let ctx = self.ctx.clone();
             match live::Host::start(live::DEFAULT_PORT, &self.live_token, move || {
                 ctx.request_repaint()

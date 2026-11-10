@@ -2355,6 +2355,16 @@ fn live_window(app: &mut App, ctx: &egui::Context) {
                             app.live_new_token();
                         }
                     });
+                    if crate::live::is_weak_token(&app.live_token) {
+                        ui.label(
+                            RichText::new(
+                                "Esta chave foi criada por uma versão antiga do RustDraw e é \
+                                 mais fácil de descobrir. Troque a chave e atualize a \
+                                 configuração do assistente.",
+                            )
+                            .color(ui.visuals().error_fg_color),
+                        );
+                    }
                     if let Some((text, msg)) = copied {
                         ui.ctx().copy_text(text);
                         app.keep_settings();

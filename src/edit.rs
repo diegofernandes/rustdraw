@@ -32,9 +32,46 @@ const KINDS: [&str; 9] = [
 ];
 const ANCHOR_NAMES: [&str; 4] = ["top", "right", "bottom", "left"];
 
-pub fn load(path: &Path) -> Result<SceneFile, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    SceneFile::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+/// Maior desenho aberto pelo `rustdraw mcp` (com imagens embutidas eles crescem).
+const MAX_DRAWING_BYTES: u64 = 256 << 20;
+
+/// Lê o texto de um desenho. Só um arquivo comum e de tamanho razoável (veja
+/// [`read_regular`]).
+pub fn read_text(path: &Path) -> Result<String, String> {
+    String::from_utf8(read_regular(path, MAX_DRAWING_BYTES)?)
+        .map_err(|_| format!("{}: não é um texto UTF-8", path.display()))
+}
+
+/// Lê um arquivo comum de até `max` bytes. Recusa o que não é arquivo comum
+/// (`/dev/zero`, um FIFO, uma pasta), que prenderia quem lê ou encheria a
+/// memória, e para de ler em `max` mesmo que o arquivo cresça no meio.
+pub fn read_regular(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let meta = std::fs::metadata(path).map_err(err)?;
+    if !meta.is_file() {
+        return Err(format!("{}: não é um arquivo comum", path.display()));
+    }
+    let too_big = || {
+        format!(
+            "{}: arquivo grande demais (o limite é {} MB)",
+            path.display(),
+            max >> 20
+        )
+    };
+    if meta.len() > max {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(err)?
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(err)?;
+    if bytes.len() as u64 > max {
+        return Err(too_big());
+    }
+    Ok(bytes)
 }
 
 /// Grava a cena sem nunca deixar o arquivo pela metade (veja [`write_atomic`]).
@@ -631,11 +668,14 @@ fn finish(els: &mut [Element], changed: &HashSet<String>) {
 // Operações
 // ---------------------------------------------------------------------------
 
+/// Maior arquivo de imagem aceito em `path`.
+const MAX_IMAGE_BYTES: u64 = 64 << 20;
+
 /// Imagem de um item `image`: o arquivo em `path` (guardado em `files`) ou um
 /// `fileId` que já está na cena. Devolve o id e o tamanho natural.
 fn image_source(files: &mut Map<String, Value>, s: &Spec) -> Result<files::Added, String> {
     if let Some(path) = string(s, "path")? {
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = read_regular(Path::new(path), MAX_IMAGE_BYTES)?;
         return files::add_bytes(files, &bytes).map_err(|e| format!("{path}: {e}"));
     }
     let id = string(s, "fileId")?.ok_or("imagem precisa de `path` (arquivo PNG/JPG)")?;
@@ -1002,6 +1042,33 @@ mod tests {
             write_private(&key, b"segredo").unwrap();
             let mode = std::fs::metadata(&key).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "só o usuário lê a chave");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_regular_files_of_a_sane_size_are_read() {
+        let dir = std::env::temp_dir().join(format!("rustdraw-read-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, [7u8; 100]).unwrap();
+        assert_eq!(read_regular(&f, 100).unwrap().len(), 100);
+        assert!(read_regular(&f, 99).unwrap_err().contains("grande demais"));
+        assert!(
+            read_regular(&dir, 100)
+                .unwrap_err()
+                .contains("não é um arquivo comum")
+        );
+        assert!(read_regular(&dir.join("falta"), 100).is_err());
+        // antes: `path: "/dev/zero"` lia até acabar a memória
+        #[cfg(unix)]
+        {
+            let e = read_regular(Path::new("/dev/zero"), 100).unwrap_err();
+            assert!(e.contains("não é um arquivo comum"), "{e}");
+            let mut files = Map::new();
+            let spec = json!([{"type": "image", "path": "/dev/zero"}]);
+            let e = add(&mut vec![], &mut files, spec.as_array().unwrap()).unwrap_err();
+            assert!(e.contains("não é um arquivo comum"), "{e}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
