@@ -6,6 +6,7 @@ use crate::export::{self, ExportOpts};
 use crate::files;
 use crate::frame;
 use crate::geom::{self, P, Prim, Rect, rotate};
+use crate::history::History;
 use crate::label;
 use crate::laser::Laser;
 use crate::library::{self, LibraryItem};
@@ -20,6 +21,7 @@ use egui::{Color32, CursorIcon, Key, Modifiers, PointerButton, Pos2, Sense, Stro
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender};
 
 pub const SELECTION: Color32 = Color32::from_rgb(0x69, 0x65, 0xdb);
 const HANDLE_PX: f32 = 7.0;
@@ -209,6 +211,13 @@ pub struct App {
     pub textures: HashMap<String, egui::TextureHandle>,
     /// Imagens que não decodificaram (não tenta de novo a cada quadro).
     bad_images: HashSet<String>,
+    /// Imagens sendo decodificadas noutra thread, para um SVG pesado ou uma
+    /// foto grande não travarem a janela; chegam por `decoded`.
+    decoding: HashSet<String>,
+    decoded: (Sender<Decoded>, Receiver<Decoded>),
+    /// Muda a cada desenho aberto: uma imagem do desenho anterior que acabe
+    /// de decodificar depois é descartada.
+    tex_gen: u64,
     /// Área do canvas na tela, do último quadro.
     view: egui::Rect,
     pub selected: HashSet<String>,
@@ -219,8 +228,7 @@ pub struct App {
     pub style: Style,
     pub cam: Cam,
     pub drag: Drag,
-    undo: Vec<Vec<Element>>,
-    redo: Vec<Vec<Element>>,
+    history: History,
     cache: HashMap<String, Cached>,
     pub editing: Option<TextEditing>,
     pub file_path: Option<PathBuf>,
@@ -232,6 +240,10 @@ pub struct App {
     pub live: Option<live::Host>,
     /// Pedidos da IA esperando o fim de um arrasto ou de um texto.
     live_queue: Vec<live::Request>,
+    /// Exportações e previews pedidos por assistentes que estão sendo
+    /// desenhados fora da thread da janela, e por onde avisam que acabaram.
+    live_rendering: usize,
+    live_rendered: (Sender<live::LogEntry>, Receiver<live::LogEntry>),
     /// Quem pediu para editar, o que o usuário decidiu e o histórico de pedidos.
     pub live_sessions: live::Sessions,
     /// Assistentes que o usuário mandou "Sempre permitir" (guardado no autosave).
@@ -289,6 +301,8 @@ pub struct App {
     ctx: egui::Context,
     /// Onde o desenho e as preferências são guardados automaticamente.
     autosave: Option<PathBuf>,
+    /// A thread que grava o autosave, criada na primeira gravação.
+    saver: Option<Sender<SaveJob>>,
     /// Forma (e ponto de encaixe) onde a ponta da seta vai ligar, para destacar.
     pub bind_hint: Option<Candidate>,
     /// Pontos selecionados da linha/seta selecionada (Delete apaga só eles).
@@ -471,6 +485,109 @@ fn parse_point(s: &str) -> Option<(f32, f32)> {
 /// Máximo de linhas da grade por direção (no menor zoom uma tela 8K pede ~800).
 const MAX_GRID_LINES: usize = 2000;
 
+/// Imagens decodificadas ao mesmo tempo, fora da thread da janela.
+const MAX_DECODING: usize = 2;
+
+/// Um pedido para a thread que grava o autosave.
+enum SaveJob {
+    Write(PathBuf, SceneFile),
+    /// Avisa quando o que foi pedido antes estiver no disco.
+    Flush(Sender<()>),
+}
+
+impl SaveJob {
+    fn run(self) {
+        match self {
+            // o autosave guarda a chave do endereço MCP
+            SaveJob::Write(path, f) => {
+                let _ = crate::edit::write_private(&path, f.to_json().as_bytes());
+            }
+            SaveJob::Flush(done) => {
+                let _ = done.send(());
+            }
+        }
+    }
+}
+
+/// Liga a thread do autosave. Se a janela pede mais rápido do que o disco
+/// grava, só a cena mais nova é gravada.
+fn spawn_saver() -> Sender<SaveJob> {
+    let (tx, rx) = std::sync::mpsc::channel::<SaveJob>();
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut jobs = vec![first];
+            jobs.extend(rx.try_iter());
+            let newest = jobs.iter().rposition(|j| matches!(j, SaveJob::Write(..)));
+            if let Some(i) = newest {
+                jobs.swap_remove(i).run();
+            }
+            // quem esperava, só depois da gravação
+            jobs.into_iter()
+                .filter(|j| matches!(j, SaveJob::Flush(_)))
+                .for_each(SaveJob::run);
+        }
+    });
+    tx
+}
+
+/// Exportações e previews de assistentes desenhados ao mesmo tempo; cada um
+/// guarda uma cópia da cena e a imagem inteira na memória.
+const MAX_LIVE_RENDERS: usize = 2;
+
+/// Roda uma ferramenta pedida por um assistente e diz o que vai para ele e
+/// para o histórico: a resposta, se deu certo, o resumo e se a cena mudou.
+fn run_live_tool(
+    req: &live::Request,
+    scene: &mut SceneFile,
+    source: &str,
+    selected: &HashSet<String>,
+) -> (Result<serde_json::Value, String>, bool, String, bool) {
+    match mcp::run_tool(&req.name, &req.args, scene, source, Some(selected)) {
+        Ok((r, changed)) => {
+            let ok = r["isError"] != true;
+            let detail = match (ok, changed) {
+                (false, _) => r["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("erro")
+                    .chars()
+                    .take(160)
+                    .collect(),
+                (true, true) => "alterou o desenho".into(),
+                (true, false) => "leitura".into(),
+            };
+            (Ok(r), ok, detail, changed)
+        }
+        Err(err) => {
+            let detail = err.chars().take(160).collect();
+            (Err(err), false, detail, false)
+        }
+    }
+}
+
+/// Uma imagem que acabou de decodificar: de qual desenho ([`App::tex_gen`]),
+/// o id e os pixels (`None` se não deu para decodificar).
+type Decoded = (u64, String, Option<egui::ColorImage>);
+
+/// Decodifica a imagem de um `dataURL` no tamanho que vai para a GPU.
+fn texture_image(url: &str) -> Option<egui::ColorImage> {
+    let img = files::decode_bytes(&files::parse_data_url(url)?)?;
+    // limite de textura das GPUs mais modestas
+    const MAX_TEX: u32 = 4096;
+    let long = img.width().max(img.height());
+    let img = if long > MAX_TEX {
+        image::imageops::resize(
+            &img,
+            (img.width() * MAX_TEX / long).max(1),
+            (img.height() * MAX_TEX / long).max(1),
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
+    let size = [img.width() as usize, img.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
+}
+
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / GRID).round() * GRID } else { v }
 }
@@ -496,6 +613,9 @@ impl App {
             files: Map::new(),
             textures: HashMap::new(),
             bad_images: HashSet::new(),
+            decoding: HashSet::new(),
+            decoded: std::sync::mpsc::channel(),
+            tex_gen: 0,
             view: egui::Rect::NOTHING,
             selected: HashSet::new(),
             tool: Tool::Select,
@@ -508,8 +628,7 @@ impl App {
                 origin: Pos2::ZERO,
             },
             drag: Drag::None,
-            undo: vec![],
-            redo: vec![],
+            history: History::default(),
             cache: HashMap::new(),
             editing: None,
             file_path: None,
@@ -518,6 +637,8 @@ impl App {
             last_watch: 0.0,
             live: None,
             live_queue: vec![],
+            live_rendering: 0,
+            live_rendered: std::sync::mpsc::channel(),
             live_sessions: live::Sessions::default(),
             live_trusted: vec![],
             live_token: live::new_token(),
@@ -559,6 +680,7 @@ impl App {
             dialog: None,
             ctx,
             autosave,
+            saver: None,
             bind_hint: None,
             point_sel: None,
             bind_seen: HashMap::new(),
@@ -679,15 +801,9 @@ impl App {
         self.sync_bindings();
         binding::tidy(&mut self.elements);
         frame::tidy(&mut self.elements);
-        if before == self.elements {
-            return;
+        if self.history.push(&before, &self.elements) {
+            self.mark_changed();
         }
-        self.undo.push(before);
-        if self.undo.len() > 300 {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
-        self.mark_changed();
     }
 
     /// Quebra os rótulos na largura das formas (só quando a cena mudou).
@@ -780,25 +896,23 @@ impl App {
 
     pub fn undo(&mut self) {
         self.finish_editing();
-        if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.elements, prev));
+        if self.history.undo(&mut self.elements) {
             self.after_history();
         }
     }
 
     pub fn redo(&mut self) {
         self.finish_editing();
-        if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.elements, next));
+        if self.history.redo(&mut self.elements) {
             self.after_history();
         }
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        self.history.can_undo()
     }
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        self.history.can_redo()
     }
 
     fn after_history(&mut self) {
@@ -821,14 +935,15 @@ impl App {
         self.files = f.files_map();
         self.textures.clear();
         self.bad_images.clear();
+        self.decoding.clear();
+        self.tex_gen += 1;
         self.elements = f.elements;
         self.bind_seen.clear();
         self.synced = None;
         self.fitted = None;
         self.bind_hint = None;
         self.selected.clear();
-        self.undo.clear();
-        self.redo.clear();
+        self.history.clear();
         self.cache.clear();
         self.drag = Drag::None;
         self.editing = None;
@@ -1339,8 +1454,17 @@ impl App {
         self.run_live_queue();
     }
 
+    /// Registra as exportações e previews que terminaram em outra thread.
+    fn finish_live_renders(&mut self) {
+        for e in self.live_rendered.1.try_iter().collect::<Vec<_>>() {
+            self.live_rendering = self.live_rendering.saturating_sub(1);
+            self.live_sessions.record(e);
+        }
+    }
+
     /// Atende os pedidos da fila (os que esperam o usuário voltam para ela).
     fn run_live_queue(&mut self) {
+        self.finish_live_renders();
         if self.live_queue.is_empty() {
             return;
         }
@@ -1354,7 +1478,14 @@ impl App {
             None => "desenho aberto no RustDraw (ainda sem arquivo)".into(),
         };
         let mut changed = false;
+        // sessões com um pedido esperando vaga para desenhar: os seguintes da
+        // mesma sessão esperam atrás dele, para a ordem não mudar
+        let mut held: HashSet<String> = HashSet::new();
         for req in std::mem::take(&mut self.live_queue) {
+            if held.contains(&req.session) {
+                self.live_queue.push(req);
+                continue;
+            }
             let (client, tool, now) = (req.client.clone(), req.name.clone(), self.now);
             let entry = |ok: bool, detail: String| live::LogEntry {
                 at: now,
@@ -1394,40 +1525,49 @@ impl App {
                             Some(true) => {}
                         }
                     }
-                    let mut scene = self.scene_file();
-                    match mcp::run_tool(
-                        &req.name,
-                        &req.args,
-                        &mut scene,
-                        &source,
-                        Some(&self.selected),
-                    ) {
-                        Ok((r, c)) => {
-                            let ok = r["isError"] != true;
-                            let detail = match (ok, c) {
-                                (false, _) => r["content"][0]["text"]
-                                    .as_str()
-                                    .unwrap_or("erro")
-                                    .chars()
-                                    .take(160)
-                                    .collect(),
-                                (true, true) => "alterou o desenho".into(),
-                                (true, false) => "leitura".into(),
-                            };
-                            let e = entry(ok, detail);
-                            self.live_sessions.record(e);
-                            if c {
-                                self.apply_live(scene);
-                                changed = true;
-                            }
-                            req.respond(Ok(r));
+                    // desenhar não muda a cena: sai da thread da janela, que
+                    // senão ficaria parada até o PNG ficar pronto
+                    if matches!(req.name.as_str(), "export_image" | "preview") {
+                        if self.live_rendering >= MAX_LIVE_RENDERS {
+                            held.insert(req.session.clone());
+                            self.live_queue.push(req);
+                            continue;
                         }
-                        Err(err) => {
-                            let e = entry(false, err.chars().take(160).collect());
-                            self.live_sessions.record(e);
-                            req.respond(Err(err));
-                        }
+                        self.live_rendering += 1;
+                        let mut scene = self.scene_file();
+                        let (source, selected) = (source.clone(), self.selected.clone());
+                        let (tx, ctx) = (self.live_rendered.0.clone(), self.ctx.clone());
+                        let (client, tool) = (client.clone(), tool.clone());
+                        std::thread::spawn(move || {
+                            let run = std::panic::AssertUnwindSafe(|| {
+                                run_live_tool(&req, &mut scene, &source, &selected)
+                            });
+                            let (r, ok, detail, _) =
+                                std::panic::catch_unwind(run).unwrap_or_else(|_| {
+                                    let msg = "o RustDraw falhou ao desenhar a imagem";
+                                    (Err(msg.to_string()), false, msg.to_string(), false)
+                                });
+                            let _ = tx.send(live::LogEntry {
+                                at: now,
+                                client,
+                                tool,
+                                ok,
+                                detail,
+                            });
+                            req.respond(r);
+                            ctx.request_repaint();
+                        });
+                        continue;
                     }
+                    let mut scene = self.scene_file();
+                    let (r, ok, detail, c) =
+                        run_live_tool(&req, &mut scene, &source, &self.selected);
+                    self.live_sessions.record(entry(ok, detail));
+                    if c {
+                        self.apply_live(scene);
+                        changed = true;
+                    }
+                    req.respond(r);
                 }
             }
         }
@@ -1515,11 +1655,7 @@ impl App {
         self.files.extend(new_files);
         if f.elements != self.elements {
             let before = std::mem::replace(&mut self.elements, f.elements);
-            self.undo.push(before);
-            if self.undo.len() > 300 {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
+            self.history.push(&before, &self.elements);
             let ids: HashSet<String> = self.elements.iter().map(|e| e.id.clone()).collect();
             self.selected.retain(|s| ids.contains(s));
             self.bind_seen.clear();
@@ -1620,14 +1756,27 @@ impl App {
                 serde_json::json!(self.live_trusted),
             );
         }
-        // o autosave guarda a chave do endereço MCP
-        let _ = crate::edit::write_private(&path, f.to_json().as_bytes());
+        // montar o JSON e gravar ficam com outra thread: num desenho com
+        // muitas imagens isso travava a janela a cada pausa
+        let job = SaveJob::Write(path, f);
+        if let Err(back) = self.saver.get_or_insert_with(spawn_saver).send(job) {
+            // a thread morreu: grava daqui mesmo
+            self.saver = None;
+            back.0.run();
+        }
         self.autosave_pending = false;
     }
 
+    /// Grava o que falta do autosave e espera chegar no disco (ao sair).
     pub fn flush_autosave(&mut self) {
         if self.autosave_pending {
             self.write_autosave();
+        }
+        if let Some(saver) = &self.saver {
+            let (done, wait) = std::sync::mpsc::channel();
+            if saver.send(SaveJob::Flush(done)).is_ok() {
+                let _ = wait.recv();
+            }
         }
     }
 
@@ -2019,32 +2168,49 @@ impl App {
 
     /// Carrega as texturas das imagens visíveis que ainda não estão na GPU.
     fn load_textures(&mut self, ctx: &egui::Context) {
+        // as que ficaram prontas
+        for (generation, id, img) in self.decoded.1.try_iter().collect::<Vec<_>>() {
+            if generation != self.tex_gen || !self.decoding.remove(&id) {
+                continue;
+            }
+            match img {
+                Some(color) => {
+                    let opts = egui::TextureOptions::LINEAR;
+                    let tex = ctx.load_texture(format!("img-{id}"), color, opts);
+                    self.textures.insert(id, tex);
+                }
+                None => {
+                    self.bad_images.insert(id);
+                }
+            }
+        }
         let missing: Vec<String> = files::used_ids(&self.elements)
             .into_iter()
-            .filter(|id| !self.textures.contains_key(*id) && !self.bad_images.contains(*id))
+            .filter(|id| {
+                !self.textures.contains_key(*id)
+                    && !self.bad_images.contains(*id)
+                    && !self.decoding.contains(*id)
+            })
             .map(String::from)
             .collect();
         for id in missing {
-            let Some(img) = files::decode(&self.files, &id) else {
+            // as outras esperam a vez: cada uma que termina pede outro quadro
+            if self.decoding.len() >= MAX_DECODING {
+                break;
+            }
+            let url = self.files.get(&id).and_then(|f| f.get("dataURL"));
+            let Some(url) = url.and_then(|u| u.as_str()).map(String::from) else {
                 self.bad_images.insert(id);
                 continue;
             };
-            // limite de textura das GPUs mais modestas
-            const MAX_TEX: u32 = 4096;
-            let img = if img.width().max(img.height()) > MAX_TEX {
-                image::imageops::resize(
-                    &img,
-                    (img.width() * MAX_TEX / img.width().max(img.height())).max(1),
-                    (img.height() * MAX_TEX / img.width().max(img.height())).max(1),
-                    image::imageops::FilterType::Triangle,
-                )
-            } else {
-                img
-            };
-            let size = [img.width() as usize, img.height() as usize];
-            let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-            let tex = ctx.load_texture(format!("img-{id}"), color, egui::TextureOptions::LINEAR);
-            self.textures.insert(id, tex);
+            self.decoding.insert(id.clone());
+            let (tx, ctx, generation) = (self.decoded.0.clone(), ctx.clone(), self.tex_gen);
+            std::thread::spawn(move || {
+                // um erro do decodificador não pode deixar a imagem esperando para sempre
+                let img = std::panic::catch_unwind(|| texture_image(&url)).unwrap_or(None);
+                let _ = tx.send((generation, id, img));
+                ctx.request_repaint();
+            });
         }
     }
 
@@ -5132,6 +5298,11 @@ mod tests {
             app.run_live_queue();
             wait
         };
+        // a exportação é desenhada em outra thread: a resposta vem depois
+        let done = |wait: &Receiver<Result<Value, String>>| {
+            wait.recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap()
+        };
         let rect = json!({"elements": [{"type": "rectangle"}]});
         assert!(
             ask(&mut app, "add_elements", rect)
@@ -5156,21 +5327,16 @@ mod tests {
         let wait = ask(&mut app, "export_image", export.clone());
         app.live_answer_files("s1", true, false);
         app.run_live_queue();
-        assert!(wait.try_recv().unwrap().is_ok() && out.exists());
+        assert!(done(&wait).is_ok() && out.exists());
         std::fs::remove_file(&out).unwrap();
         let wait = ask(&mut app, "export_image", export.clone());
         assert!(wait.try_recv().is_err() && !out.exists());
         // até fechar o editor: os próximos passam direto
         app.live_answer_files("s1", true, true);
         app.run_live_queue();
-        assert!(wait.try_recv().unwrap().is_ok() && out.exists());
+        assert!(done(&wait).is_ok() && out.exists());
         std::fs::remove_file(&out).unwrap();
-        assert!(
-            ask(&mut app, "export_image", export)
-                .try_recv()
-                .unwrap()
-                .is_ok()
-        );
+        assert!(done(&ask(&mut app, "export_image", export)).is_ok());
         assert!(out.exists());
         // ler uma imagem do disco também pergunta (a outro processo)
         let img = json!({"elements": [{"type": "image", "path": out.to_str().unwrap()}]});
@@ -5187,6 +5353,103 @@ mod tests {
         assert!(read.try_recv().unwrap().is_ok());
         assert_eq!(app.live_queue_len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assistant_renders_leave_the_window_thread_two_at_a_time() {
+        use serde_json::json;
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        app.live_trusted = vec!["claude-code".into()];
+        let rect = || json!({"elements": [{"type": "rectangle"}]});
+        let push = |app: &mut App, session: &str, tool: &str, args: Value| {
+            let (req, wait) = live::Request::for_test("claude-code", session, tool, args);
+            app.live_queue.push(req);
+            wait
+        };
+        let first = push(&mut app, "s1", "add_elements", rect());
+        let previews: Vec<_> = (0..3)
+            .map(|_| push(&mut app, "s1", "preview", json!({})))
+            .collect();
+        let after = push(&mut app, "s1", "add_elements", rect());
+        let other = push(&mut app, "s2", "add_elements", rect());
+        app.run_live_queue();
+        // dois previews saíram para desenhar; o terceiro espera vaga, e o que
+        // a mesma sessão pediu depois dele espera atrás, na ordem
+        assert!(first.try_recv().unwrap().is_ok());
+        assert_eq!(app.live_rendering, MAX_LIVE_RENDERS);
+        assert_eq!(app.live_queue_len(), 2);
+        assert!(after.try_recv().is_err());
+        // outra sessão não espera por isso
+        assert!(other.try_recv().unwrap().is_ok());
+        assert_eq!(app.elements.len(), 2);
+        let wait = std::time::Duration::from_secs(60);
+        for p in &previews[..2] {
+            let r = p.recv_timeout(wait).unwrap().unwrap();
+            assert_eq!(r["content"][0]["type"], "image", "{r}");
+        }
+        // com as vagas livres, o resto anda e tudo fica no histórico
+        while app.live_rendering > 0 {
+            app.finish_live_renders();
+            std::thread::yield_now();
+        }
+        app.run_live_queue();
+        assert!(after.try_recv().unwrap().is_ok());
+        assert_eq!(app.elements.len(), 3);
+        assert!(previews[2].recv_timeout(wait).unwrap().is_ok());
+        while app.live_rendering > 0 {
+            app.finish_live_renders();
+            std::thread::yield_now();
+        }
+        let log = &app.live_sessions.log;
+        assert_eq!(log.iter().filter(|e| e.tool == "preview").count(), 3);
+        assert!(
+            log.iter().all(|e| e.ok),
+            "{:?}",
+            log.front().map(|e| &e.detail)
+        );
+    }
+
+    #[test]
+    fn images_are_decoded_off_the_window_thread() {
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        let red = image::RgbaImage::from_pixel(8, 4, image::Rgba([255, 0, 0, 255]));
+        let png = files::encode_png(&red).unwrap();
+        let ok = files::add_bytes(&mut app.files, &png).unwrap();
+        // o SVG hostil da análise: antes, o primeiro quadro levava minutos
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="2000"><filter id="f" x="-1000%" y="-1000%" width="2000%" height="2000%"><feGaussianBlur stdDeviation="500"/><feMorphology operator="dilate" radius="500"/><feTurbulence baseFrequency="0.9" numOctaves="100000"/></filter><rect width="2000" height="2000" filter="url(#f)"/></svg>"#;
+        let heavy = files::add_bytes(&mut app.files, svg.as_bytes()).unwrap();
+        // e uma que não é imagem
+        app.files.insert(
+            "ruim".into(),
+            serde_json::json!({"dataURL": "data:image/png;base64,AAAA"}),
+        );
+        let bad = files::Added {
+            id: "ruim".into(),
+            width: 10,
+            height: 10,
+        };
+        for a in [&ok, &heavy, &bad] {
+            app.elements.push(files::image_element(a, 0.0, 0.0, 100.0));
+        }
+        let t = std::time::Instant::now();
+        paint(&mut app);
+        assert!(t.elapsed().as_secs() < 5, "o quadro não espera as imagens");
+        assert!(app.textures.is_empty() && app.decoding.len() <= MAX_DECODING);
+        // os quadros seguintes recebem as que ficaram prontas
+        while app.textures.len() + app.bad_images.len() < 3 {
+            assert!(t.elapsed().as_secs() < 60, "{:?}", app.decoding);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            paint(&mut app);
+        }
+        assert!(app.textures.contains_key(&ok.id) && app.textures.contains_key(&heavy.id));
+        assert!(app.bad_images.contains("ruim") && app.decoding.is_empty());
+        // uma imagem do desenho anterior que termine depois é descartada
+        app.decoding.insert("velha".into());
+        let old = (app.tex_gen, "velha".to_string(), None);
+        app.apply_scene(SceneFile::new(vec![], "#ffffff", false));
+        app.decoded.0.send(old).unwrap();
+        paint(&mut app);
+        assert!(app.bad_images.is_empty() && app.textures.is_empty());
     }
 
     #[test]
@@ -5236,6 +5499,37 @@ mod tests {
         app.flush_autosave();
         let back = SceneFile::parse(&std::fs::read_to_string(&saved).unwrap()).unwrap();
         assert_eq!(back.app_state["rustdrawMcpToken"], "chave-antiga");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn autosave_is_written_off_the_window_thread_and_exit_waits_for_it() {
+        let dir = tmp_dir();
+        let saved = dir.join("autosave.excalidraw");
+        let mut app = App::empty(egui::Context::default(), Some(saved.clone()), vec![]);
+        // várias gravações seguidas: no disco fica a última
+        for i in 0..20 {
+            let before = app.elements.clone();
+            let style = app.style.clone();
+            app.elements
+                .push(Element::new("rectangle", i as f64, 0.0, &style));
+            app.commit(before);
+            app.write_autosave();
+            assert!(!app.autosave_pending);
+        }
+        assert!(app.saver.is_some());
+        app.flush_autosave();
+        let back = SceneFile::parse(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        assert_eq!(back.elements, app.elements);
+        // nada de temporário esquecido ao lado
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        // sem nada pendente, sair não grava de novo nem trava
+        let stamp = std::fs::metadata(&saved).unwrap().modified().unwrap();
+        app.flush_autosave();
+        assert_eq!(
+            std::fs::metadata(&saved).unwrap().modified().unwrap(),
+            stamp
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

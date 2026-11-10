@@ -17,6 +17,7 @@ mod files;
 mod fonts;
 mod frame;
 mod geom;
+mod history;
 mod icons;
 mod label;
 mod laser;

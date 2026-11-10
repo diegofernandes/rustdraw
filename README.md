@@ -163,7 +163,8 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/render.rs` | Desenho das primitivas no canvas (egui) |
 | `src/export.rs` | PNG (tiny-skia + fontdue) e SVG |
 | `src/tikz.rs` | TikZ (LaTeX): formas, setas e textos em comandos do TikZ, com traço limpo |
-| `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, histórico, arquivos |
+| `src/app.rs` | Estado do editor, ferramentas, mouse/teclado, arquivos |
+| `src/history.rs` | Desfazer e refazer: cada passo guarda só o que mudou na cena |
 | `src/library.rs` | Biblioteca de formas no formato `.excalidrawlib` |
 | `src/ui.rs` | Barra de ferramentas, painel de propriedades, menu e janelas |
 | `src/icons.rs` | Ícones da interface e ícone do app (caminhos SVG desenhados à mão) |
