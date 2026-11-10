@@ -184,6 +184,20 @@ fn svg_options() -> &'static resvg::usvg::Options<'static> {
     })
 }
 
+/// As mesmas opções, mas com os filtros (`<filter>`) desligados.
+fn svg_options_without_filters() -> &'static resvg::usvg::Options<'static> {
+    static CELL: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let base = svg_options();
+        let mut opt = resvg::usvg::Options::default();
+        opt.image_href_resolver.resolve_string = Box::new(|_, _| None);
+        opt.fontdb = base.fontdb.clone();
+        opt.font_family = base.font_family.clone();
+        opt.style_sheet = Some("* { filter: none !important }".into());
+        opt
+    })
+}
+
 fn svg_tree(bytes: &[u8]) -> Option<resvg::usvg::Tree> {
     resvg::usvg::Tree::from_data(bytes, svg_options()).ok()
 }
@@ -197,15 +211,84 @@ fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
     ))
 }
 
+/// Teto do custo dos filtros de um SVG, na unidade de [`svg_filter_cost`]:
+/// uns 5 s de processador (cada unidade leva perto de 22 ns). Um desfoque na
+/// imagem inteira de 2048 px custa 4e7.
+const MAX_FILTER_COST: f64 = 2.5e8;
+
+/// Maior região de um filtro, em vezes a área da imagem. O padrão do SVG
+/// (10% de folga de cada lado) dá 1,44; o resvg aceitaria até 25, com
+/// centenas de MB por efeito.
+const MAX_FILTER_AREA: f64 = 4.0;
+
+/// Quanto custa aplicar os filtros (`<filter>`) do SVG rasterizado em
+/// `w`×`h` com a escala `k`: pixels da região de cada filtro × peso dos
+/// efeitos (medidos: 1 = um efeito simples, como o `feOffset`). O resvg
+/// aplica cada efeito na região inteira, e alguns custam mais por pixel
+/// conforme os parâmetros. Infinito se uma região passa de
+/// [`MAX_FILTER_AREA`].
+fn svg_filter_cost(tree: &resvg::usvg::Tree, k: f32, w: u32, h: u32) -> f64 {
+    use resvg::usvg::{Group, Node, filter::Kind};
+    fn walk(g: &Group, k: f32, image_px: f64, cost: &mut f64) {
+        let ts = g.abs_transform();
+        // quanto o grupo amplia (média dos dois eixos), já na escala final
+        let scale = ((ts.sx * ts.sy - ts.kx * ts.ky).abs().sqrt() * k) as f64;
+        for f in g.filters() {
+            let px = f.rect().transform(ts).map_or(f64::INFINITY, |r| {
+                (r.width() * k) as f64 * (r.height() * k) as f64
+            });
+            if px.is_nan() || px > image_px * MAX_FILTER_AREA * 1.01 {
+                *cost = f64::INFINITY;
+                return;
+            }
+            let weight: f64 = f
+                .primitives()
+                .iter()
+                .map(|p| match p.kind() {
+                    Kind::Morphology(m) => {
+                        let side = |r: f32| 2.0 * r as f64 * scale + 1.0;
+                        1.0 + side(m.radius_x().get()) * side(m.radius_y().get()) / 12.0
+                    }
+                    Kind::Turbulence(t) => 3.0 + 2.5 * t.num_octaves() as f64,
+                    Kind::ConvolveMatrix(c) => {
+                        1.0 + c.matrix().columns() as f64 * c.matrix().rows() as f64 / 4.0
+                    }
+                    Kind::GaussianBlur(_) | Kind::DropShadow(_) => 7.0,
+                    Kind::DiffuseLighting(_) | Kind::SpecularLighting(_) => 2.0,
+                    _ => 1.0,
+                })
+                .sum();
+            *cost += px * weight.max(1.0);
+        }
+        for n in g.children() {
+            if let Node::Group(child) = n {
+                walk(child, k, image_px, cost);
+            }
+            n.subroots(|sub| walk(sub, k, image_px, cost));
+        }
+    }
+    let mut cost = 0.0;
+    walk(tree.root(), k, w as f64 * h as f64, &mut cost);
+    cost
+}
+
 /// Rasteriza um SVG com folga para o zoom: ícones pequenos ganham resolução
-/// (lado maior de pelo menos 512 px), mas sem passar de 2048 px.
+/// (lado maior de pelo menos 512 px), mas sem passar de 2048 px. Um SVG com
+/// filtros caros demais ([`MAX_FILTER_COST`]) sai sem os filtros, em vez de
+/// prender o programa por minutos.
 fn svg_raster(bytes: &[u8]) -> Option<RgbaImage> {
-    let tree = svg_tree(bytes)?;
+    let mut tree = svg_tree(bytes)?;
     let size = tree.size();
     let long = size.width().max(size.height());
     let k = (long * 2.0).clamp(512.0, 2048.0) / long;
     let w = (size.width() * k).round().max(1.0) as u32;
     let h = (size.height() * k).round().max(1.0) as u32;
+    if svg_filter_cost(&tree, k, w, h) > MAX_FILTER_COST {
+        tree = resvg::usvg::Tree::from_data(bytes, svg_options_without_filters()).ok()?;
+        if svg_filter_cost(&tree, k, w, h) > MAX_FILTER_COST {
+            return None;
+        }
+    }
     let mut pm = tiny_skia::Pixmap::new(w, h)?;
     resvg::render(
         &tree,
@@ -358,6 +441,7 @@ pub fn subset(files: &Map<String, Value>, els: &[Element]) -> Map<String, Value>
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn png(w: u32, h: u32) -> Vec<u8> {
@@ -436,6 +520,60 @@ mod tests {
         assert_eq!(mime_of(&bmp), Some("image/bmp"));
         let a = add_bytes(&mut files, &bmp).unwrap();
         assert_eq!(decode(&files, &a.id).unwrap().dimensions(), (3, 2));
+    }
+
+    #[test]
+    fn svg_with_heavy_filters_is_drawn_without_them() {
+        let svg = |region: &str, prims: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><filter id="f" {region}>{prims}</filter><rect x="100" y="100" width="100" height="100" fill="red" filter="url(#f)"/></svg>"#
+            )
+        };
+        let cost = |s: &str| {
+            let tree = svg_tree(s.as_bytes()).unwrap();
+            svg_filter_cost(&tree, 600.0 / 300.0, 600, 600)
+        };
+        // um desfoque comum: barato, e sai desfocado (a borda vaza do quadrado)
+        let blur = svg("", r#"<feGaussianBlur stdDeviation="8"/>"#);
+        assert!(cost(&blur) < MAX_FILTER_COST / 100.0, "{}", cost(&blur));
+        let img = decode_bytes(blur.as_bytes()).unwrap();
+        assert_eq!(img.dimensions(), (600, 600));
+        assert!(img.get_pixel(190, 300).0[3] > 0, "desfoque aplicado");
+        // os do arquivo hostil da análise: região de 20× o lado, dilatação de
+        // raio 500, cem mil oitavas de ruído
+        let huge = r#"x="-1000%" y="-1000%" width="2000%" height="2000%""#;
+        for (region, prims) in [
+            (huge, r#"<feOffset dx="1"/>"#),
+            ("", r#"<feMorphology operator="dilate" radius="500"/>"#),
+            (
+                "",
+                r#"<feTurbulence baseFrequency="0.9" numOctaves="100000"/>"#,
+            ),
+            ("", &r#"<feGaussianBlur stdDeviation="3"/>"#.repeat(2000)),
+            (
+                huge,
+                r#"<feGaussianBlur stdDeviation="500"/><feMorphology operator="dilate" radius="500"/><feTurbulence baseFrequency="0.9" numOctaves="100000"/>"#,
+            ),
+        ] {
+            let s = svg(region, prims);
+            assert!(cost(&s) > MAX_FILTER_COST, "{prims}: {}", cost(&s));
+            let t = std::time::Instant::now();
+            let img = decode_bytes(s.as_bytes()).unwrap();
+            assert!(t.elapsed().as_secs() < 20, "{prims}: {:?}", t.elapsed());
+            // sem o filtro: o quadrado vermelho inteiro e nada fora dele
+            assert_eq!(img.get_pixel(300, 300).0, [255, 0, 0, 255], "{prims}");
+            assert_eq!(img.get_pixel(190, 300).0[3], 0, "{prims}");
+        }
+        // o filtro pedido num `style` também sai
+        let inline = svg(huge, r#"<feOffset dx="1"/>"#).replace(
+            r#"filter="url(#f)""#,
+            r#"style="filter:url(#f) !important""#,
+        );
+        assert!(cost(&inline) > MAX_FILTER_COST);
+        let t = std::time::Instant::now();
+        let img = decode_bytes(inline.as_bytes());
+        assert!(t.elapsed().as_secs() < 20);
+        assert_eq!(img.unwrap().get_pixel(300, 300).0, [255, 0, 0, 255]);
     }
 
     #[test]

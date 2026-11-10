@@ -231,8 +231,32 @@ pub fn export_bounds(els: &[Element], opts: &ExportOpts) -> Option<Rect> {
 // ---------------------------------------------------------------------------
 
 pub fn render_png(els: &[Element], opts: &ExportOpts) -> Result<Vec<u8>, String> {
-    let pixmap = render_pixmap(els, opts)?;
-    pixmap.encode_png().map_err(|e| e.to_string())
+    encode_png(&render_pixmap(els, opts)?)
+}
+
+/// Grava o PNG. O `encode_png` do tiny-skia comprime no nível padrão, que
+/// num desenho grande e cheio de hachuras (6000 px de lado) levava 7 s, mais
+/// que o triplo do desenho em si. O nível 3 com o filtro "sub" leva um sexto
+/// disso, e o arquivo sai do mesmo tamanho (uns 4% maior no pior caso medido,
+/// quase 20% menor com hachura cruzada).
+fn encode_png(pm: &Pixmap) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let mut rgba = Vec::with_capacity(pm.data().len());
+    for px in pm.pixels() {
+        let c = px.demultiply();
+        rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    let mut out = Vec::new();
+    PngEncoder::new_with_quality(&mut out, CompressionType::Level(3), FilterType::Sub)
+        .write_image(
+            &rgba,
+            pm.width(),
+            pm.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 pub fn render_pixmap(els: &[Element], opts: &ExportOpts) -> Result<Pixmap, String> {
@@ -740,6 +764,32 @@ pub fn render_svg(els: &[Element], opts: &ExportOpts) -> Result<String, String> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn png_has_the_same_pixels_as_the_tiny_skia_encoder() {
+        use crate::model::{Element, Style};
+        // hachura, transparência e fundo transparente: os casos em que tirar
+        // a pré-multiplicação poderia mudar um pixel
+        let mut r = Element::new("rectangle", 0.0, 0.0, &Style::default());
+        (r.width, r.height) = (300.0, 200.0);
+        r.fill_style = "cross-hatch".into();
+        r.background_color = "#ffc9c9".into();
+        r.opacity = 60.0;
+        let opts = super::ExportOpts {
+            background: false,
+            ..Default::default()
+        };
+        let pm = super::render_pixmap(&[r], &opts).unwrap();
+        let ours = image::load_from_memory(&super::encode_png(&pm).unwrap()).unwrap();
+        let theirs = image::load_from_memory(&pm.encode_png().unwrap()).unwrap();
+        assert_eq!(ours.to_rgba8().dimensions(), (pm.width(), pm.height()));
+        assert!(ours.to_rgba8().as_raw() == theirs.to_rgba8().as_raw());
+        assert!(
+            ours.to_rgba8()
+                .pixels()
+                .any(|p| p.0[3] != 0 && p.0[3] != 255)
+        );
+    }
+
     use super::*;
     use crate::model::{Element, Style};
 
