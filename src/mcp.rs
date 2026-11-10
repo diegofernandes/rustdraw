@@ -220,20 +220,62 @@ impl Server {
     }
 
     /// Carrega o arquivo, executa a ferramenta (tudo ou nada) e grava se mudou.
+    /// Só mexe em desenhos: o `file` vem do assistente, que pode ter sido
+    /// levado por um texto malicioso a apontar para outro arquivo do usuário.
     fn call_file(&self, name: &str, args: &Map<String, Value>, path: &Path) -> Value {
-        let out = if name == "new_scene" {
-            new_scene_file(args, path).map(|v| text_result(v, false))
-        } else {
-            edit::load(path).and_then(|mut scene| {
-                let source = path.display().to_string();
-                let (r, changed) = run_tool(name, args, &mut scene, &source, None)?;
-                if changed {
-                    edit::save(path, &scene)?;
-                }
-                Ok(r)
-            })
-        };
+        let out = (|| {
+            // o arquivo padrão foi escolhido por quem iniciou o servidor
+            if self.default_file.as_deref() != Some(path) && !is_drawing_name(path) {
+                return Err(format!(
+                    "{}: `file` precisa terminar em .excalidraw",
+                    path.display()
+                ));
+            }
+            if name == "new_scene" {
+                return new_scene_file(args, path).map(|v| text_result(v, false));
+            }
+            let text = edit::read_text(path)?;
+            let mut scene =
+                SceneFile::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            let source = path.display().to_string();
+            let (r, changed) = run_tool(name, args, &mut scene, &source, None)?;
+            if changed {
+                check_is_drawing(path, &text)?;
+                edit::save(path, &scene)?;
+            }
+            Ok(r)
+        })();
         out.unwrap_or_else(|e| text_result(json!(e), true))
+    }
+}
+
+/// Nome de desenho: o parâmetro `file` só aceita estes.
+fn is_drawing_name(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".excalidraw") || name.ends_with(".excalidraw.json")
+}
+
+/// Recusa regravar um arquivo que não é um desenho do Excalidraw (um vazio
+/// pode). O leitor aceita JSON sem `type`, e sem isto um `package.json`
+/// passaria por desenho vazio e seria trocado por um.
+fn check_is_drawing(path: &Path, text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let kind = serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| v.get("type")?.as_str().map(str::to_string));
+    if kind.as_deref() == Some("excalidraw") {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: não é um desenho do Excalidraw (falta \"type\": \"excalidraw\"), então não foi alterado",
+            path.display()
+        ))
     }
 }
 
@@ -258,11 +300,15 @@ const TOOLS: [&str; 7] = [
 
 fn new_scene_file(args: &Map<String, Value>, path: &Path) -> Result<Value, String> {
     let overwrite = args.get("overwrite").and_then(|v| v.as_bool()) == Some(true);
-    if path.exists() && !overwrite {
-        return Err(format!(
-            "{} já existe (use overwrite: true para substituir)",
-            path.display()
-        ));
+    // `symlink_metadata`: um atalho quebrado também conta como existente
+    if path.symlink_metadata().is_ok() {
+        if !overwrite {
+            return Err(format!(
+                "{} já existe (use overwrite: true para substituir)",
+                path.display()
+            ));
+        }
+        check_is_drawing(path, &edit::read_text(path)?)?;
     }
     let bg = args
         .get("background")
@@ -713,6 +759,104 @@ mod tests {
         assert_eq!(r["content"][0]["mimeType"], "image/png");
         let r = call(&mut s, 7, "new_scene", json!({}));
         assert_eq!(r["isError"], true, "não sobrescreve sem overwrite");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_file_parameter_only_touches_drawings() {
+        let dir = std::env::temp_dir().join(format!("rustdraw-mcp-{}", crate::model::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |name: &str| dir.join(name).to_str().unwrap().to_string();
+        let mut s = Server::new(None);
+        let err = |r: &Value| {
+            assert_eq!(r["isError"], true, "{r}");
+            r["content"][0]["text"].as_str().unwrap().to_string()
+        };
+
+        // outro tipo de arquivo: nem cria, nem troca, nem lê
+        std::fs::write(dir.join("notas.txt"), "minhas notas").unwrap();
+        for (tool, args) in [
+            ("new_scene", json!({"file": at("novo.sh")})),
+            (
+                "new_scene",
+                json!({"file": at("notas.txt"), "overwrite": true}),
+            ),
+            ("get_scene", json!({"file": at("notas.txt")})),
+            (
+                "add_elements",
+                json!({"file": at("notas.txt"), "elements": []}),
+            ),
+        ] {
+            let r = call(&mut s, 1, tool, args);
+            assert!(err(&r).contains("precisa terminar em .excalidraw"), "{r}");
+        }
+        assert!(!dir.join("novo.sh").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notas.txt")).unwrap(),
+            "minhas notas"
+        );
+
+        // nome de desenho, conteúdo de outra coisa: não é regravado
+        let pkg = r#"{"name": "meu-projeto", "private": true}"#;
+        std::fs::write(dir.join("pkg.excalidraw"), pkg).unwrap();
+        let rect = json!([{"type": "rectangle"}]);
+        for (tool, args) in [
+            (
+                "new_scene",
+                json!({"file": at("pkg.excalidraw"), "overwrite": true}),
+            ),
+            (
+                "add_elements",
+                json!({"file": at("pkg.excalidraw"), "elements": rect}),
+            ),
+        ] {
+            let r = call(&mut s, 2, tool, args);
+            assert!(err(&r).contains("não é um desenho do Excalidraw"), "{r}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pkg.excalidraw")).unwrap(),
+            pkg
+        );
+
+        // desenho de verdade: cria, edita e troca com overwrite
+        for name in ["a.excalidraw", "B.Excalidraw.JSON"] {
+            let r = call(&mut s, 3, "new_scene", json!({"file": at(name)}));
+            assert_eq!(r["isError"], false, "{r}");
+            let r = call(
+                &mut s,
+                4,
+                "add_elements",
+                json!({"file": at(name), "elements": rect}),
+            );
+            assert_eq!(r["isError"], false, "{r}");
+            let r = call(
+                &mut s,
+                5,
+                "new_scene",
+                json!({"file": at(name), "overwrite": true}),
+            );
+            assert_eq!(r["isError"], false, "{r}");
+        }
+        // um arquivo vazio com nome de desenho pode ser preenchido
+        std::fs::write(dir.join("vazio.excalidraw"), "").unwrap();
+        let r = call(
+            &mut s,
+            6,
+            "new_scene",
+            json!({"file": at("vazio.excalidraw"), "overwrite": true}),
+        );
+        assert_eq!(r["isError"], false, "{r}");
+
+        // o arquivo padrão foi escolhido por quem iniciou o servidor: o nome
+        // é livre, mas o conteúdo ainda precisa ser um desenho
+        let json_file = dir.join("desenho.json");
+        let mut own = Server::new(Some(json_file.clone()));
+        let r = call(&mut own, 7, "new_scene", json!({}));
+        assert_eq!(r["isError"], false, "{r}");
+        std::fs::write(&json_file, pkg).unwrap();
+        let r = call(&mut own, 8, "add_elements", json!({"elements": rect}));
+        assert!(err(&r).contains("não é um desenho do Excalidraw"), "{r}");
+        assert_eq!(std::fs::read_to_string(&json_file).unwrap(), pkg);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

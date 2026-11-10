@@ -40,9 +40,41 @@ pub fn mcp_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/mcp")
 }
 
-/// Chave nova para o endereço do editor.
+/// Chave nova para o endereço do editor, tirada do gerador do sistema
+/// operacional (e não do [`new_id`], que é previsível). Vazia se o sistema não
+/// der números aleatórios: aí a edição por IA não liga.
 pub fn new_token() -> String {
-    format!("{}{}", new_id(), new_id())
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-";
+    let mut bytes = [0u8; TOKEN_LEN];
+    if getrandom::fill(&mut bytes).is_err() {
+        return String::new();
+    }
+    // 256 é múltiplo de 64: cada letra sai com a mesma chance
+    bytes
+        .iter()
+        .map(|b| ALPHABET[(b % 64) as usize] as char)
+        .collect()
+}
+
+/// Letras de uma chave (6 bits cada: 258 bits).
+const TOKEN_LEN: usize = 43;
+
+/// A chave veio do gerador antigo (até a v0.1.14): 42 letras tiradas do mesmo
+/// gerador dos ids dos elementos, semeado pelo relógio. Quem tem um desenho
+/// feito na sessão em que ela nasceu consegue recalculá-la, então o painel
+/// sugere trocar.
+pub fn is_weak_token(token: &str) -> bool {
+    token.len() != TOKEN_LEN
+}
+
+/// Compara a chave recebida com a certa olhando todas as letras, para o tempo
+/// da resposta não dizer quantas letras do começo estavam certas.
+fn same_token(got: &str, token: &str) -> bool {
+    let (a, b) = (got.as_bytes(), token.as_bytes());
+    if b.is_empty() || a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
 pub fn discovery_path() -> Option<PathBuf> {
@@ -71,6 +103,8 @@ pub struct Host {
     pub rx: Receiver<Request>,
     pub port: u16,
     stop: Arc<AtomicBool>,
+    /// Quem aceita as conexões; ao terminar, solta a porta.
+    accept: Option<std::thread::JoinHandle<()>>,
     token: String,
     file: PathBuf,
 }
@@ -93,6 +127,9 @@ impl Host {
         token: &str,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Host, String> {
+        if token.is_empty() {
+            return Err("o sistema não deu números aleatórios para a chave".into());
+        }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .or_else(|_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
             .map_err(|e| format!("escutar: {e}"))?;
@@ -115,7 +152,7 @@ impl Host {
         };
         let sessions: Arc<HttpSessions> = Arc::default();
         let (stop2, token2) = (stop.clone(), token.clone());
-        std::thread::spawn(move || {
+        let accept = std::thread::spawn(move || {
             while !stop2.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((s, _)) => {
@@ -131,6 +168,7 @@ impl Host {
             rx,
             port,
             stop,
+            accept: Some(accept),
             token,
             file: file.to_path_buf(),
         })
@@ -185,6 +223,11 @@ fn short(v: &str, default: &str) -> String {
 impl Drop for Host {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // espera a porta ser solta (até 100 ms): "Trocar chave" liga de novo
+        // em seguida e, com a porta ainda presa, o endereço mudaria
+        if let Some(t) = self.accept.take() {
+            let _ = t.join();
+        }
         // outra janela pode ter ligado depois; só apaga se o arquivo ainda é nosso
         let ours = std::fs::read_to_string(&self.file)
             .ok()
@@ -219,7 +262,7 @@ fn serve(s: TcpStream, token: &str, editor: &Editor, sessions: &HttpSessions) {
     let Ok(msg) = serde_json::from_str::<Value>(&line) else {
         return answer(Err("pedido inválido".into()));
     };
-    if msg["token"] != token {
+    if !msg["token"].as_str().is_some_and(|t| same_token(t, token)) {
         return answer(Err("chave inválida".into()));
     }
     let Some(name) = msg["name"].as_str() else {
@@ -299,7 +342,8 @@ fn serve_http(
     if path != "/mcp" && path != "/" {
         return fail("404 Not Found", "o endereço MCP é /mcp");
     }
-    if header("authorization").and_then(|a| a.strip_prefix("Bearer ")) != Some(token) {
+    let key = header("authorization").and_then(|a| a.strip_prefix("Bearer "));
+    if !key.is_some_and(|k| same_token(k, token)) {
         return fail(
             "401 Unauthorized",
             "chave inválida: use a do painel Edição por IA do RustDraw",
@@ -491,6 +535,48 @@ fn call_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restarting_keeps_the_port() {
+        let file = std::env::temp_dir()
+            .join(format!("rustdraw-port-{}", new_id()))
+            .join("mcp-live.json");
+        let first = Host::start_at(&file, 0, &new_token(), || {}).unwrap();
+        let port = first.port;
+        // deixa quem aceita conexões entrar no laço, como num editor já aberto
+        std::thread::sleep(Duration::from_millis(150));
+        // como em "Trocar chave": desliga e liga em seguida, com outra chave
+        drop(first);
+        let again = Host::start_at(&file, port, &new_token(), || {}).unwrap();
+        assert_eq!(again.port, port);
+        drop(again);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn tokens_come_from_the_system_and_are_compared_whole() {
+        let (a, b) = (new_token(), new_token());
+        assert_eq!(a.len(), TOKEN_LEN);
+        assert_ne!(a, b);
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
+        assert!(!is_weak_token(&a));
+        // a chave antiga eram dois ids (42 letras) do gerador dos elementos
+        assert!(is_weak_token(&format!("{}{}", new_id(), new_id())));
+        // os ids dos elementos não dizem nada sobre a chave seguinte: antes,
+        // ela saía do mesmo gerador
+        assert!(same_token(&a, &a));
+        assert!(!same_token(&a, &b));
+        assert!(!same_token(&a[..TOKEN_LEN - 1], &a));
+        assert!(!same_token("", &a));
+        // sem chave (o sistema não deu números aleatórios) ninguém entra
+        assert!(!same_token("", ""));
+        let file = std::env::temp_dir().join(format!("rustdraw-nokey-{}", new_id()));
+        assert!(Host::start_at(&file, 0, "", || {}).is_err());
+        assert!(!file.exists());
+    }
 
     #[test]
     fn round_trip_and_cleanup() {

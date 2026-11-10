@@ -471,7 +471,14 @@ impl Writer<'_> {
             return;
         };
         let Some(name) = self.image_file(file_id, *uv) else {
-            let _ = writeln!(self.body, "  % imagem {file_id} não incluída");
+            // o id vem do arquivo: com uma quebra de linha ele sairia do
+            // comentário e o resto viraria código LaTeX
+            let id: String = file_id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                .take(64)
+                .collect();
+            let _ = writeln!(self.body, "  % imagem {id} não incluída");
             for q in image_placeholder(p) {
                 self.prim(&q);
             }
@@ -626,10 +633,97 @@ impl Writer<'_> {
     }
 }
 
+/// Pedaços de nome de comando que uma fórmula não usa e que, no LaTeX, leem ou
+/// gravam arquivos, rodam programas ou montam outros comandos. Vale para
+/// qualquer comando que contenha o pedaço (`\\input`, `\\verbatiminput`,
+/// `\\lstinputlisting`...).
+const UNSAFE_MATH: [&str; 24] = [
+    "input",
+    "include",
+    "import",
+    "read",
+    "write",
+    "openin",
+    "openout",
+    "file",
+    "package",
+    "class",
+    "catcode",
+    "csname",
+    "scantokens",
+    "special",
+    "immediate",
+    "shell",
+    "directlua",
+    "latelua",
+    "luaexec",
+    "luadirect",
+    "verbatim",
+    "listing",
+    "bibliography",
+    "pdf",
+];
+
+/// Comandos que definem outros (`\\def`, `\\gdef`, `\\let`, `\\newcommand`...).
+fn defines(cmd: &str) -> bool {
+    cmd.ends_with("def")
+        || matches!(cmd, "let" | "futurelet")
+        || cmd.contains("command")
+        || cmd.contains("environment")
+        || cmd.starts_with("lua")
+}
+
+/// A fórmula (o que vai entre `$...$`) pode passar como está? O texto vem do
+/// desenho, que pode ser de outra pessoa: sem isto, `$\\input{/etc/passwd}$`
+/// poria um arquivo de quem compila dentro do PDF. Recusa comandos de
+/// [`UNSAFE_MATH`], o `^^` (que escreve uma `\\` escondida), o `%` (que
+/// comentaria o fim da linha) e chaves desencontradas (que fechariam o nó).
+fn safe_math(m: &[char]) -> bool {
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < m.len() {
+        match m[i] {
+            '\\' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < m.len() && m[end].is_ascii_alphabetic() {
+                    end += 1;
+                }
+                if end == start {
+                    // `\\{`, `\\%`, `\\,`: um símbolo só
+                    i = start + 1;
+                    continue;
+                }
+                let cmd: String = m[start..end].iter().collect();
+                let lower = cmd.to_ascii_lowercase();
+                if UNSAFE_MATH.iter().any(|w| lower.contains(w)) || defines(&lower) {
+                    return false;
+                }
+                i = end;
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            '%' => return false,
+            '^' if m.get(i + 1) == Some(&'^') => return false,
+            c if c.is_control() => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+    depth == 0
+}
+
 /// Escapa o texto para o LaTeX. Trechos entre `$...$` passam como estão
 /// (fórmulas), seguindo a regra do Pandoc: o `$` de abertura vem colado no
 /// que segue e o de fechamento colado no que vem antes e sem dígito depois,
-/// então "R$ 5 e R$ 10" e "custa $5 ou $10" continuam texto.
+/// então "R$ 5 e R$ 10" e "custa $5 ou $10" continuam texto. Uma fórmula que
+/// não passa em [`safe_math`] também continua texto.
 fn latex_text(s: &str) -> String {
     let ch: Vec<char> = s.chars().collect();
     let n = ch.len();
@@ -643,7 +737,7 @@ fn latex_text(s: &str) -> String {
                     && ch[j - 1] != '\\'
                     && !ch.get(j + 1).is_some_and(|c| c.is_ascii_digit())
             });
-            if let Some(j) = close {
+            if let Some(j) = close.filter(|&j| safe_math(&ch[i + 1..j])) {
                 out.extend(&ch[i..=j]);
                 i = j + 1;
                 continue;
@@ -873,6 +967,66 @@ mod tests {
         assert_eq!(code.matches("\\node").count(), 2, "linha vazia não vira nó");
         assert!(code.contains("{Olá}") && code.contains("{mundo}"));
         assert!(code.contains("anchor=base west") && code.contains("\\fontsize{15}{18}"));
+    }
+
+    #[test]
+    fn hostile_math_stays_text() {
+        // fórmulas comuns continuam fórmulas
+        for ok in [
+            "$x^2$",
+            "$\\frac{a}{b} \\leq \\sqrt{\\alpha_1} \\cdot \\bullet$",
+            "$\\sum_{i=0}^{n} \\left( \\int f \\, dx \\right)$",
+            "$\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$",
+            "$\\mathbb{R} \\rightarrow \\text{área} \\{1\\}$",
+            "$50\\%$",
+        ] {
+            assert_eq!(latex_text(ok), ok);
+        }
+        // comandos que leem arquivos, rodam programas ou montam comandos
+        for bad in [
+            "$\\input{/etc/passwd}$",
+            "$\\InputIfFileExists{a}{}{}$",
+            "$\\verbatiminput{/etc/passwd}$",
+            "$\\immediate\\write18{id}$",
+            "$\\openin5=x \\read5 to\\a$",
+            "$\\csname in\\endcsname$",
+            "$\\catcode`\\@=11$",
+            "$\\def\\a{\\a}\\a$",
+            "$\\let\\a\\b$",
+            "$\\directlua{os.execute()}$",
+            "$\\pdffiledump length 9{/etc/passwd}$",
+            "$\\includegraphics{x}$",
+            // `^^5c` é uma `\\` para o TeX
+            "$^^5cinput{x}$",
+            // fecharia o nó e o resto viraria código do desenho
+            "$x}; \\draw (0,0) -- (1,1); {$",
+            "$a % b$",
+        ] {
+            let out = latex_text(bad);
+            assert!(out.starts_with("\\$") && out.ends_with("\\$"), "{out}");
+            assert!(!out.contains("\\input") && !out.contains("^^"), "{out}");
+            // sem `\\` crua: todas viram \textbackslash{} ou escape de símbolo
+            let raw = out
+                .replace("\\textbackslash{}", "")
+                .replace("\\textasciicircum{}", "");
+            assert!(
+                !raw.chars()
+                    .zip(raw.chars().skip(1))
+                    .any(|(a, b)| a == '\\' && b.is_ascii_alphabetic()),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_file_id_stays_inside_the_comment() {
+        let s = Style::default();
+        let mut el = Element::new("image", 0.0, 0.0, &s);
+        (el.width, el.height) = (40.0, 20.0);
+        el.set_field("fileId", json!("x\n\\input{/etc/passwd}\n%"));
+        let code = tikz(&[el]);
+        assert!(code.contains("  % imagem xinputetcpasswd não incluída\n"));
+        assert!(!code.contains("{/etc/passwd}"), "{code}");
     }
 
     #[test]
