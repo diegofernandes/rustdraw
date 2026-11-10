@@ -185,12 +185,7 @@ pub fn load(p: &Path) -> Result<Vec<LibraryItem>, String> {
 
 /// Grava de forma atômica (arquivo temporário + renomear).
 pub fn save(p: &Path, items: &[LibraryItem]) -> Result<(), String> {
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, to_json(items)).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, p).map_err(|e| e.to_string())
+    crate::edit::write_atomic(p, to_json(items).as_bytes())
 }
 
 /// O texto parece um `.excalidrawlib` (para abrir/arrastar sem depender da extensão).

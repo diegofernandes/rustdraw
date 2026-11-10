@@ -1336,6 +1336,11 @@ impl App {
     fn poll_live(&mut self) {
         let Some(host) = &self.live else { return };
         self.live_queue.extend(host.rx.try_iter());
+        self.run_live_queue();
+    }
+
+    /// Atende os pedidos da fila (os que esperam o usuário voltam para ela).
+    fn run_live_queue(&mut self) {
         if self.live_queue.is_empty() {
             return;
         }
@@ -1369,6 +1374,26 @@ impl App {
                     )));
                 }
                 Some(true) => {
+                    // ler e gravar arquivos do disco pede outra permissão
+                    let uses = mcp::file_uses(&req.name, &req.args);
+                    if !uses.is_empty() {
+                        match self.live_sessions.decide_files(&req, &uses) {
+                            None => {
+                                self.live_queue.push(req);
+                                continue;
+                            }
+                            Some(false) => {
+                                let e = entry(false, "arquivos recusados".into());
+                                self.live_sessions.record(e);
+                                req.respond(Err(format!(
+                                    "O usuário não permitiu que {client} leia ou grave \
+                                     arquivos do disco pelo RustDraw."
+                                )));
+                                continue;
+                            }
+                            Some(true) => {}
+                        }
+                    }
                     let mut scene = self.scene_file();
                     match mcp::run_tool(
                         &req.name,
@@ -1422,6 +1447,13 @@ impl App {
             self.autosave_pending = true;
             self.last_change = self.now;
         }
+        self.ctx.request_repaint();
+    }
+
+    /// Resposta do usuário à pergunta de arquivos: para o pedido que espera
+    /// ou, com `whole_session`, para o assistente até o editor fechar.
+    pub fn live_answer_files(&mut self, session: &str, allow: bool, whole_session: bool) {
+        self.live_sessions.set_files(session, allow, whole_session);
         self.ctx.request_repaint();
     }
 
@@ -5083,6 +5115,78 @@ mod tests {
         // sem janela, as texturas das letras não vão para lugar nenhum
         out.textures_delta.clear();
         out.shapes.len()
+    }
+
+    #[test]
+    fn an_assistant_needs_a_second_yes_to_touch_files() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("rustdraw-ask-{}", crate::model::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("saida.svg");
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        // de confiança pelo nome: edita sem perguntar...
+        app.live_trusted = vec!["claude-code".into()];
+        let ask = |app: &mut App, tool: &str, args: Value| {
+            let (req, wait) = live::Request::for_test("claude-code", "s1", tool, args);
+            app.live_queue.push(req);
+            app.run_live_queue();
+            wait
+        };
+        let rect = json!({"elements": [{"type": "rectangle"}]});
+        assert!(
+            ask(&mut app, "add_elements", rect)
+                .try_recv()
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(app.elements.len(), 1);
+        // ...mas gravar um arquivo espera o usuário
+        let export = json!({"output": out.to_str().unwrap()});
+        let wait = ask(&mut app, "export_image", export.clone());
+        assert!(wait.try_recv().is_err() && !out.exists());
+        let s = app.live_sessions.pending_files().unwrap();
+        let uses = &s.file_ask.as_ref().unwrap().uses;
+        assert!(uses[0].write && uses[0].path.ends_with("saida.svg"));
+        // recusado: nada gravado, e o assistente fica sabendo
+        app.live_answer_files("s1", false, false);
+        app.run_live_queue();
+        let e = wait.try_recv().unwrap().unwrap_err();
+        assert!(e.contains("não permitiu") && !out.exists(), "{e}");
+        // permitido: grava esse, e o seguinte pergunta de novo
+        let wait = ask(&mut app, "export_image", export.clone());
+        app.live_answer_files("s1", true, false);
+        app.run_live_queue();
+        assert!(wait.try_recv().unwrap().is_ok() && out.exists());
+        std::fs::remove_file(&out).unwrap();
+        let wait = ask(&mut app, "export_image", export.clone());
+        assert!(wait.try_recv().is_err() && !out.exists());
+        // até fechar o editor: os próximos passam direto
+        app.live_answer_files("s1", true, true);
+        app.run_live_queue();
+        assert!(wait.try_recv().unwrap().is_ok() && out.exists());
+        std::fs::remove_file(&out).unwrap();
+        assert!(
+            ask(&mut app, "export_image", export)
+                .try_recv()
+                .unwrap()
+                .is_ok()
+        );
+        assert!(out.exists());
+        // ler uma imagem do disco também pergunta (a outro processo)
+        let img = json!({"elements": [{"type": "image", "path": out.to_str().unwrap()}]});
+        let (req, wait) = live::Request::for_test("claude-code", "s2", "add_elements", img);
+        app.live_queue.push(req);
+        app.run_live_queue();
+        assert!(wait.try_recv().is_err());
+        let s = app.live_sessions.pending_files().unwrap();
+        assert!(!s.file_ask.as_ref().unwrap().uses[0].write);
+        // o que não toca em arquivos continua passando enquanto isso
+        let (req, read) = live::Request::for_test("claude-code", "s2", "get_scene", json!({}));
+        app.live_queue.push(req);
+        app.run_live_queue();
+        assert!(read.try_recv().unwrap().is_ok());
+        assert_eq!(app.live_queue_len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

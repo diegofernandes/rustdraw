@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +31,9 @@ use std::time::Duration;
 const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 /// Tamanho máximo de um pedido (imagens vêm por caminho, não embutidas).
 const MAX_REQUEST: u64 = 16 << 20;
+/// Maior começo de pedido (primeira linha e cabeçalhos HTTP) lido antes de
+/// conferir a chave.
+const MAX_HEAD: u64 = 64 << 10;
 /// Porta do endereço MCP do editor (fixa para a configuração do assistente
 /// continuar valendo); se estiver ocupada, o editor usa outra qualquer.
 pub const DEFAULT_PORT: u16 = 7470;
@@ -96,6 +99,25 @@ impl Request {
     pub fn respond(self, r: Result<Value, String>) {
         let _ = self.reply.send(r);
     }
+
+    /// Um pedido solto, com o lado que recebe a resposta (para os testes).
+    #[cfg(test)]
+    pub fn for_test(
+        client: &str,
+        session: &str,
+        name: &str,
+        args: Value,
+    ) -> (Request, Receiver<Result<Value, String>>) {
+        let (reply, wait) = mpsc::channel();
+        let req = Request {
+            client: client.into(),
+            session: session.into(),
+            name: name.into(),
+            args: args.as_object().cloned().unwrap_or_default(),
+            reply,
+        };
+        (req, wait)
+    }
 }
 
 /// Lado do editor: escuta enquanto existir.
@@ -152,13 +174,21 @@ impl Host {
         };
         let sessions: Arc<HttpSessions> = Arc::default();
         let (stop2, token2) = (stop.clone(), token.clone());
+        let open = Arc::new(AtomicUsize::new(0));
         let accept = std::thread::spawn(move || {
             while !stop2.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((s, _)) => {
+                        // cheio: fecha na hora, sem thread nem memória novas
+                        let Some(slot) = Slot::take(&open) else {
+                            continue;
+                        };
                         let (token, editor, sessions) =
                             (token2.clone(), editor.clone(), sessions.clone());
-                        std::thread::spawn(move || serve(s, &token, &editor, &sessions));
+                        std::thread::spawn(move || {
+                            serve(s, &token, &editor, &sessions);
+                            drop(slot);
+                        });
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(100)),
                 }
@@ -172,6 +202,33 @@ impl Host {
             token,
             file: file.to_path_buf(),
         })
+    }
+}
+
+/// Conexões atendidas ao mesmo tempo. Cada uma tem a sua thread e pode guardar
+/// um pedido inteiro antes de mostrar a chave; sem teto, outro programa do
+/// computador abriria milhares e esgotaria a memória do editor.
+const MAX_CONNECTIONS: usize = 16;
+
+/// Uma vaga entre as [`MAX_CONNECTIONS`]; devolvida ao sair de escopo.
+struct Slot(Arc<AtomicUsize>);
+
+impl Slot {
+    fn take(open: &Arc<AtomicUsize>) -> Option<Slot> {
+        let mut n = open.load(Ordering::SeqCst);
+        while n < MAX_CONNECTIONS {
+            match open.compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(Slot(open.clone())),
+                Err(now) => n = now,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -244,9 +301,17 @@ fn serve(s: TcpStream, token: &str, editor: &Editor, sessions: &HttpSessions) {
     let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
     let mut line = String::new();
     let Ok(read) = s.try_clone() else { return };
-    let mut r = BufReader::new(read.take(MAX_REQUEST));
+    // antes da chave, só o começo do pedido; o resto é lido depois de conferi-la
+    let mut r = BufReader::new(read.take(MAX_HEAD));
     if r.read_line(&mut line).is_err() {
         return;
+    }
+    if !line.ends_with('\n') && line.len() as u64 >= MAX_HEAD {
+        // pedido longo da ponte (`rustdraw mcp`): a chave vem dentro da linha
+        r.get_mut().set_limit(MAX_REQUEST - MAX_HEAD);
+        if r.read_line(&mut line).is_err() {
+            return;
+        }
     }
     if line.trim_end().ends_with("HTTP/1.1") || line.trim_end().ends_with("HTTP/1.0") {
         return serve_http(&line, r, &s, token, editor, sessions);
@@ -295,7 +360,7 @@ fn is_local_host(host: &str) -> bool {
 /// respostas JSON). Cada conexão atende um pedido.
 fn serve_http(
     first: &str,
-    mut r: impl BufRead,
+    mut r: BufReader<std::io::Take<TcpStream>>,
     out: &TcpStream,
     token: &str,
     editor: &Editor,
@@ -367,6 +432,8 @@ fn serve_http(
     if len as u64 > MAX_REQUEST {
         return fail("413 Content Too Large", "pedido grande demais");
     }
+    // a chave conferiu: libera o corpo (parte dele pode já estar no buffer)
+    r.get_mut().set_limit(len as u64);
     let mut body = vec![0; len];
     if r.read_exact(&mut body).is_err() {
         return;
@@ -411,6 +478,26 @@ pub struct Session {
     pub client: String,
     /// `None` enquanto o usuário não respondeu.
     pub allowed: Option<bool>,
+    /// O usuário deixou este processo ler e gravar arquivos do disco até o
+    /// editor fechar. Não vem do "Sempre permitir": mexer no disco não se
+    /// desfaz com Ctrl+Z, e o nome do assistente é só o que ele declarou.
+    pub files: bool,
+    /// O pedido que espera o usuário liberar arquivos.
+    pub file_ask: Option<FileAsk>,
+}
+
+/// Um arquivo do disco que um pedido quer ler ou gravar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileUse {
+    pub write: bool,
+    pub path: String,
+}
+
+/// Arquivos de um pedido esperando o usuário, e a resposta (que vale só para
+/// esse pedido).
+pub struct FileAsk {
+    pub uses: Vec<FileUse>,
+    pub answer: Option<bool>,
 }
 
 /// Um pedido atendido (ou recusado), para o painel "Edição por IA".
@@ -442,8 +529,53 @@ impl Sessions {
             id: req.session.clone(),
             client: req.client.clone(),
             allowed,
+            files: false,
+            file_ask: None,
         });
         allowed
+    }
+
+    /// `req`, já aceito por [`Sessions::decide`], pode mexer nos arquivos
+    /// `uses`? `None` = esperando o usuário: o pedido fica registrado e a
+    /// resposta vale só para ele (os pedidos de um processo chegam em ordem),
+    /// a não ser que o usuário libere o processo todo.
+    pub fn decide_files(&mut self, req: &Request, uses: &[FileUse]) -> Option<bool> {
+        let s = self.list.iter_mut().find(|s| s.id == req.session)?;
+        if s.files {
+            return Some(true);
+        }
+        match s.file_ask.take() {
+            Some(FileAsk {
+                answer: Some(a), ..
+            }) => Some(a),
+            waiting => {
+                s.file_ask = waiting.or_else(|| {
+                    Some(FileAsk {
+                        uses: uses.to_vec(),
+                        answer: None,
+                    })
+                });
+                None
+            }
+        }
+    }
+
+    /// O primeiro processo esperando o usuário liberar arquivos.
+    pub fn pending_files(&self) -> Option<&Session> {
+        self.list
+            .iter()
+            .find(|s| s.file_ask.as_ref().is_some_and(|a| a.answer.is_none()))
+    }
+
+    /// Resposta do usuário: para o pedido que espera ou, com `whole_session`,
+    /// para tudo o que o processo pedir até o editor fechar.
+    pub fn set_files(&mut self, id: &str, allowed: bool, whole_session: bool) {
+        if let Some(s) = self.list.iter_mut().find(|s| s.id == id) {
+            s.files = allowed && whole_session;
+            if let Some(a) = &mut s.file_ask {
+                a.answer = Some(allowed);
+            }
+        }
     }
 
     /// O primeiro processo esperando aprovação.
@@ -454,6 +586,13 @@ impl Sessions {
     pub fn set(&mut self, id: &str, allowed: bool) {
         if let Some(s) = self.list.iter_mut().find(|s| s.id == id) {
             s.allowed = Some(allowed);
+            if !allowed {
+                // revogar tira também os arquivos
+                s.files = false;
+                if let Some(a) = &mut s.file_ask {
+                    a.answer = Some(false);
+                }
+            }
         }
     }
 
@@ -535,6 +674,107 @@ fn call_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_access_is_asked_per_request_or_for_the_whole_session() {
+        let mut s = Sessions::default();
+        let uses = [FileUse {
+            write: true,
+            path: "/tmp/a.png".into(),
+        }];
+        let (req, _wait) = Request::for_test("claude-code", "s1", "export_image", json!({}));
+        // "Sempre permitir" aceita o assistente, mas não libera arquivos
+        assert_eq!(s.decide(&req, &["claude-code".to_string()]), Some(true));
+        assert!(s.pending_files().is_none());
+        assert_eq!(s.decide_files(&req, &uses), None);
+        assert_eq!(
+            s.pending_files().unwrap().file_ask.as_ref().unwrap().uses,
+            uses
+        );
+        // enquanto o usuário não responde, o pedido continua esperando
+        assert_eq!(s.decide_files(&req, &uses), None);
+        // "Permitir": vale para esse pedido só
+        s.set_files("s1", true, false);
+        assert!(s.pending_files().is_none());
+        assert_eq!(s.decide_files(&req, &uses), Some(true));
+        assert_eq!(
+            s.decide_files(&req, &uses),
+            None,
+            "o seguinte pergunta de novo"
+        );
+        // "Recusar": também só esse
+        s.set_files("s1", false, false);
+        assert_eq!(s.decide_files(&req, &uses), Some(false));
+        assert_eq!(s.decide_files(&req, &uses), None);
+        // "até fechar o editor": não pergunta mais
+        s.set_files("s1", true, true);
+        assert_eq!(s.decide_files(&req, &uses), Some(true));
+        assert_eq!(s.decide_files(&req, &uses), Some(true));
+        // outro processo com o mesmo nome não herda a permissão
+        let (other, _w) = Request::for_test("claude-code", "s2", "export_image", json!({}));
+        assert_eq!(s.decide(&other, &["claude-code".to_string()]), Some(true));
+        assert_eq!(s.decide_files(&other, &uses), None);
+        // revogar o assistente tira os arquivos dele
+        s.set("s1", false);
+        assert!(!s.list[0].files);
+    }
+
+    #[test]
+    fn connections_are_capped_and_the_head_is_small_before_the_key() {
+        let dir = std::env::temp_dir().join(format!("rustdraw-cap-{}", new_id()));
+        let host = Host::start_at(&dir.join("mcp-live.json"), 0, "segredo", || {}).unwrap();
+        let port = host.port;
+        let auth = "Authorization: Bearer segredo\r\n";
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"t"}}}"#;
+
+        // conexões paradas ocupam todas as vagas: a seguinte é fechada na hora
+        let idle: Vec<TcpStream> = (0..MAX_CONNECTIONS)
+            .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap())
+            .collect();
+        std::thread::sleep(Duration::from_millis(300));
+        let mut extra = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        extra
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let _ = write!(extra, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\n");
+        let mut out = String::new();
+        let _ = extra.read_to_string(&mut out);
+        assert_eq!(out, "", "sem vaga, sem resposta");
+        // liberadas as vagas, o servidor volta a atender
+        drop(idle);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(http(port, "POST", auth, init).0, 200);
+
+        // cabeçalhos enormes sem a chave: a conexão cai sem resposta
+        let big = format!("X-Lixo: {}\r\n", "a".repeat(MAX_HEAD as usize));
+        let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let _ = write!(s, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n{big}\r\n");
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert_eq!(out, "");
+        // com a chave, um corpo maior que o começo permitido passa inteiro
+        let long = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"t"}},"x":"{}"}}}}"#,
+            "b".repeat(3 * MAX_HEAD as usize)
+        );
+        assert_eq!(http(port, "POST", auth, &long).0, 200);
+        // e um pedido longo da ponte também
+        let file = dir.join("mcp-live.json");
+        let big_args = json!({"x": "c".repeat(3 * MAX_HEAD as usize)});
+        let me = Client {
+            name: "Teste".into(),
+            session: "s".into(),
+        };
+        let caller = std::thread::spawn(move || {
+            call_at(&file, &me, "get_scene", big_args.as_object().unwrap())
+        });
+        let req = host.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(req.args["x"].as_str().unwrap().len(), 3 * MAX_HEAD as usize);
+        req.respond(Ok(json!("ok")));
+        assert_eq!(caller.join().unwrap(), Ok(json!("ok")));
+        drop(host);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn restarting_keeps_the_port() {

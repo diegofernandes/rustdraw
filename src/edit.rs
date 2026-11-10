@@ -98,12 +98,22 @@ fn write_with(path: &Path, data: &[u8], private: bool) -> Result<(), String> {
     if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(err)?;
     }
+    // nome novo a cada gravação e `create_new`: duas gravações ao mesmo tempo
+    // não se atropelam, e um atalho plantado com o nome do temporário não
+    // desvia a escrita para outro arquivo
     let mut tmp = target.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.tmp", new_id()));
     let tmp = PathBuf::from(tmp);
     let written = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        // fechado antes de receber a chave
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // fechado desde a criação, antes de receber a chave
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         #[cfg(unix)]
         if private {
             use std::os::unix::fs::PermissionsExt;
@@ -1015,7 +1025,24 @@ mod tests {
         write_atomic(&p, b"um").unwrap();
         write_atomic(&p, b"dois").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "dois");
-        assert!(!dir.join("sub").join("d.excalidraw.tmp").exists());
+        // nenhum temporário fica para trás
+        let left: Vec<_> = std::fs::read_dir(dir.join("sub"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["d.excalidraw"]);
+        // um atalho plantado com o nome antigo do temporário não é seguido
+        #[cfg(unix)]
+        {
+            let victim = dir.join("vitima.txt");
+            std::fs::write(&victim, "intacto").unwrap();
+            let planted = dir.join("sub").join("d.excalidraw.tmp");
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+            write_atomic(&p, b"tres").unwrap();
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "intacto");
+            std::fs::remove_file(&planted).unwrap();
+            write_atomic(&p, b"dois").unwrap();
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
