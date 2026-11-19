@@ -69,6 +69,7 @@ pub enum Icon {
     Mcp,
     GoTo,
     Position,
+    Minimap,
 }
 
 impl Icon {
@@ -376,6 +377,14 @@ impl Icon {
                 "M4.6 3.4 V19.6 M4.2 19.4 H20.6 M2.8 5.4 L4.6 3.4 L6.4 5.4 \
                  M18.6 17.6 L20.6 19.4 L18.6 21.2 M14.4 13.2 V16.8 M11.2 10 H7.6",
                 "M12.6 10 a1.8 1.8 0 1 0 3.6 0 a1.8 1.8 0 1 0 -3.6 0",
+            ),
+            // a tela com um rabisco de conteúdo e, no canto, o mini mapa com
+            // a área visível preenchida
+            Icon::Minimap => (
+                "M3.2 4.6 H20.8 M20.4 4.2 V19.6 M20.8 19.4 H3.4 M3.6 19.8 V4.2 \
+                 M6.2 10.2 C7.2 8.2 8.8 7.4 10.4 8.2 \
+                 M11.2 11 H18 M17.7 10.7 V17 M18 16.8 H11 M11.3 17.1 V10.7",
+                "M12.8 12.5 h2.8 v2.6 h-2.8 z",
             ),
         }
     }
@@ -881,6 +890,7 @@ mod tests {
             Icon::Mcp,
             Icon::GoTo,
             Icon::Position,
+            Icon::Minimap,
         ];
         for icon in all {
             let (stroke, fill) = icon.paths();
@@ -911,6 +921,7 @@ mod tests {
             Icon::Group,
             Icon::FlipH,
             Icon::FlipV,
+            Icon::Minimap,
         ] {
             for sub in parse(icon.paths().1) {
                 let pts = sub.flatten();

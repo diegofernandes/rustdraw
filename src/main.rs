@@ -26,6 +26,7 @@ mod live;
 #[cfg(target_os = "macos")]
 mod macos;
 mod mcp;
+mod minimap;
 mod model;
 mod note;
 mod render;

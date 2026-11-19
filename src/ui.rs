@@ -1116,6 +1116,15 @@ fn menu(app: &mut App, ctx: &egui::Context) {
                 ) {
                     app.show_stats = !app.show_stats;
                 }
+                if toggle(
+                    ui,
+                    Some(Icon::Minimap),
+                    "Mini mapa",
+                    "Alt+M",
+                    app.minimap.show,
+                ) {
+                    app.toggle_minimap();
+                }
                 let live = app.live.is_some();
                 if menu_row(
                     ui,
@@ -1182,6 +1191,7 @@ enum Act {
     Zen,
     ViewMode,
     Stats,
+    Minimap,
     GoTo,
     CopyStyles,
     PasteStyles,
@@ -1224,6 +1234,7 @@ fn context_entries(app: &App, on_element: bool) -> Vec<Entry> {
             Some(app.view_mode),
         ),
         Item("Estatísticas", "Alt+/", Act::Stats, Some(app.show_stats)),
+        Item("Mini mapa", "Alt+M", Act::Minimap, Some(app.minimap.show)),
     ];
     let goto = Item("Ir para posição…", "Alt+G", Act::GoTo, None);
     let mut v = vec![];
@@ -1340,6 +1351,7 @@ fn act_icon(app: &App, act: Act) -> Icon {
         Act::Zen => Icon::Zen,
         Act::ViewMode => Icon::ViewMode,
         Act::Stats => Icon::Stats,
+        Act::Minimap => Icon::Minimap,
         Act::GoTo => Icon::GoTo,
         Act::CopyStyles => Icon::CopyStyles,
         Act::PasteStyles => Icon::PasteStyles,
@@ -1380,6 +1392,7 @@ fn run_act(app: &mut App, ctx: &egui::Context, act: Act, at: Pos2) {
         Act::Zen => app.zen_mode = !app.zen_mode,
         Act::ViewMode => app.toggle_view_mode(),
         Act::Stats => app.show_stats = !app.show_stats,
+        Act::Minimap => app.toggle_minimap(),
         Act::GoTo => app.toggle_goto(app.canvas_rect()),
         Act::CopyStyles => app.copy_styles(),
         Act::PasteStyles => app.paste_styles(),
@@ -1571,6 +1584,17 @@ fn bottom_bar(app: &mut App, ctx: &egui::Context, view: Rect) {
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             footer_panel(ui, |ui| {
+                if tool_button(
+                    ui,
+                    app.minimap.show,
+                    FOOTER_H,
+                    "Mini mapa (Alt+M)",
+                    Icon::Minimap,
+                )
+                .clicked()
+                {
+                    app.toggle_minimap();
+                }
                 if tool_button(ui, app.show_help, FOOTER_H, "Atalhos (?)", Icon::Help).clicked() {
                     app.show_help = !app.show_help;
                 }
@@ -1863,6 +1887,7 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Modo de visualização", "Alt+R"),
                     ("Tema escuro", "Alt+Shift+D"),
                     ("Estatísticas", "Alt+/"),
+                    ("Mini mapa", "Alt+M"),
                     ("Mover a tela", "Espaço+arrastar · roda"),
                     ("Atalhos de teclado", "?"),
                 ];
@@ -2112,6 +2137,7 @@ pub fn overlays(app: &mut App, ctx: &egui::Context, view: Rect) {
         app.library_drag = None;
     }
     bottom_bar(app, ctx, view);
+    minimap(app, ctx, view);
     mode_exit_button(app, ctx);
     stats_window(app, ctx);
     goto_window(app, ctx, view);
@@ -2197,7 +2223,7 @@ fn live_chip(app: &mut App, ctx: &egui::Context) {
     let port = h.port;
     let waiting = app.live_sessions.pending().is_some();
     egui::Area::new(Id::unique("live_chip"))
-        .anchor(Align2::RIGHT_BOTTOM, vec2(-60.0, -12.0))
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-92.0, -12.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             footer_panel(ui, |ui| {
@@ -2593,6 +2619,123 @@ fn goto_window(app: &mut App, ctx: &egui::Context, view: Rect) {
     } else if go {
         app.submit_goto(view);
     }
+}
+
+/// Mini mapa (Alt+M): a cena inteira em miniatura no canto de baixo, com o
+/// retângulo da área visível. Clicar leva a tela até o ponto; arrastar move
+/// a tela junto; a roda do mouse sobre o mapa muda o zoom.
+fn minimap(app: &mut App, ctx: &egui::Context, view: Rect) {
+    use crate::minimap::{Fit, SIZE};
+    if !app.minimap.show {
+        app.minimap.end_drag();
+        return;
+    }
+    app.update_minimap(ctx);
+    // acima do botão de ajuda; com a biblioteca ou o painel da IA abertos,
+    // ao lado deles
+    let mut right = if library_visible(app) {
+        LIB_W + 24.0
+    } else {
+        12.0
+    };
+    if app.show_live {
+        let live = ctx
+            .memory(|m| m.area_rect(Id::unique("Edição por IA")))
+            .map_or(444.0, |r| view.right() - r.left() + 12.0);
+        right = right.max(live);
+    }
+    let world_view = app.view_world(view);
+    egui::Area::new(Id::unique("minimap"))
+        .anchor(
+            Align2::RIGHT_BOTTOM,
+            vec2(-right, -(12.0 + FOOTER_H + 6.0 + 12.0)),
+        )
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            panel_frame(ui)
+                .inner_margin(Margin::same(4))
+                .show(ui, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(SIZE, Sense::click_and_drag());
+                    let painter = ui.painter_at(rect);
+                    let bg = parse_color(&app.view_bg).unwrap_or([255, 255, 255, 255]);
+                    painter.rect_filled(rect, 6.0, render::c32(bg, app.dark, 1.0));
+                    let fit = Fit::new(app.minimap.area(world_view), rect);
+                    match app.minimap.texture() {
+                        Some((tex, b)) => {
+                            painter.image(
+                                tex.id(),
+                                fit.rect(*b),
+                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        None if app.elements.is_empty() => {
+                            painter.text(
+                                rect.center(),
+                                Align2::CENTER_CENTER,
+                                "Desenho vazio",
+                                FontId::proportional(12.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                        }
+                        None => {}
+                    }
+                    // área visível, contornada em óxido
+                    let vr = fit.view_rect(world_view);
+                    let accent = accent_fg(ui);
+                    painter.rect(
+                        vr,
+                        2.0,
+                        accent.gamma_multiply(0.10),
+                        Stroke::new(1.5, accent),
+                        StrokeKind::Middle,
+                    );
+
+                    // navegação
+                    if resp.drag_started() || resp.clicked() {
+                        let at = ctx
+                            .input(|i| i.pointer.press_origin())
+                            .unwrap_or(rect.center());
+                        let area = app.minimap.area(world_view);
+                        app.minimap.start_drag(area, world_view, fit.world(at));
+                    }
+                    if (resp.dragged() || resp.clicked() || resp.drag_started())
+                        && let Some(p) = resp.interact_pointer_pos()
+                    {
+                        let c = app.minimap.drag_center(fit.world(p));
+                        app.center_on(view, c);
+                    }
+                    if resp.drag_stopped() || resp.clicked() {
+                        app.minimap.end_drag();
+                    }
+                    if resp.hovered() {
+                        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+                        let zoom = ctx.input(|i| i.zoom_delta());
+                        let factor = if zoom != 1.0 {
+                            zoom
+                        } else {
+                            (scroll / 200.0).exp()
+                        };
+                        if factor != 1.0 {
+                            app.zoom_at(view.center(), factor);
+                        }
+                        let over_view = ctx.pointer_hover_pos().is_some_and(|p| vr.contains(p));
+                        ui.ctx().set_cursor_icon(if app.minimap.dragging() {
+                            egui::CursorIcon::Grabbing
+                        } else if over_view {
+                            egui::CursorIcon::Grab
+                        } else {
+                            egui::CursorIcon::PointingHand
+                        });
+                    }
+                    if app.minimap.dragging() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    }
+                    resp.on_hover_text(keys(
+                        "Mini mapa: clique ou arraste para navegar, roda para zoom (Alt+M)",
+                    ));
+                });
+        });
 }
 
 /// Painel de estatísticas (Alt+/).

@@ -25,6 +25,7 @@ Editor de diagramas no estilo **Excalidraw**, nativo em Rust e **100% offline** 
 - **Exportação**: PNG (1×/2×/3×, com/sem fundo, modo escuro) e SVG autocontido (com a fonte embutida), com pré-visualização
 - **TikZ (LaTeX)**: o botão **TikZ** da exportação (que respeita "Somente a seleção") grava um `.tex` com um `tikzpicture` para pôr no documento com `\input{...}`; "Copiar TikZ" (ou "Copiar como TikZ" no botão direito, que copia só o que está selecionado) copia o código. Formas, setas (com as pontas do `arrows.meta`), hachuras (`patterns.meta`), cores, tracejados, opacidade, rotação e frames viram comandos do TikZ com **traço limpo**, sem o efeito à mão. Cada linha de texto é um `\node` na fonte do documento (a fonte normal sai em `\sffamily` e a de código em `\ttfamily`), e o que estiver entre `$...$` passa como fórmula: `$E = mc^2$` vira matemática, mas "R$ 5" continua texto. Uma fórmula com comandos que leem arquivos ou definem outros comandos (`\input`, `\def`...) também sai como texto, para um desenho de outra pessoa não mexer no seu documento. As imagens são gravadas numa pasta `<nome>-imagens` ao lado do `.tex` e entram com `\includegraphics`; ao copiar, ficam como um quadro cinza. As linhas que o LaTeX precisa no preâmbulo vêm comentadas no começo do arquivo
 - **Posição e "Ir para"**: o rodapé mostra a posição do cursor na cena (X, Y, as mesmas coordenadas do `.excalidraw`). Clicar nela, ou `Alt+G`, abre "Ir para posição": digite X e Y (ou cole "120, -45" no X) e a tela centraliza nesse ponto, sem mudar o zoom
+- **Mini mapa**: `Alt+M` (ou o botão ao lado do `?` no rodapé, ou "Mini mapa" no menu) mostra o desenho inteiro em miniatura no canto de baixo, com o retângulo da área visível. Clicar no mapa leva a tela até o ponto, arrastar move a tela junto (pegando o retângulo, ele anda de onde foi pego) e a roda do mouse sobre o mapa muda o zoom. A miniatura é desenhada fora da thread da janela e só quando o desenho muda; num desenho grande (3 mil elementos ou mais), só quando ele para de mudar
 - **Conforto**: tema escuro, grade com encaixe, zoom no cursor, salvamento automático (o desenho volta ao reabrir), arrastar arquivo para a janela
 
 ## Baixar
@@ -146,7 +147,7 @@ Pelo `rustdraw mcp`, com `file` (ou um arquivo padrão na linha de comando), a f
 | Ajustar à seleção | `Shift+2` / `Shift+3` | | Limpar o canvas | `Ctrl+Delete` |
 | Frame | `F` | | Renomear frame | `Enter` / duplo clique no nome |
 | Encaixar em objetos | `Alt+S` (`Ctrl` inverte ao arrastar) | | Ir para posição (X, Y) | `Alt+G` |
-| Ponteiro laser | `K` | | | |
+| Ponteiro laser | `K` | | Mini mapa | `Alt+M` |
 | Nota | `N` | | | |
 
 Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No macOS, `Ctrl` vira `Cmd`. O botão direito abre o menu de opções.
@@ -171,6 +172,7 @@ Os atalhos seguem os do [Excalidraw](https://excalidraw.com) (diálogo `?`). No 
 | `src/frame.rs` | Frames: quem está dentro de qual, recorte, nomes |
 | `src/note.rs` | Notas adesivas: estilo, marca, dobra e sombra da nota |
 | `src/laser.rs` | Ponteiro laser: rastro que afina e some com o tempo |
+| `src/minimap.rs` | Mini mapa: miniatura da cena (tiny-skia, em outra thread) e conversão mapa ↔ cena |
 | `src/fonts.rs` | Fontes embutidas |
 | `src/edit.rs` | Edição da cena por comandos JSON (criar, alterar, apagar, rótulos, setas ligadas) |
 | `src/mcp.rs` | Servidor MCP por stdio (JSON-RPC) |
