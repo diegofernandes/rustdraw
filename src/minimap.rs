@@ -26,6 +26,11 @@ const MIN_INTERVAL: f64 = 0.25;
 const BIG_SCENE: usize = 3000;
 /// Quanto tempo a cena grande tem que ficar parada (s).
 const SETTLE: f64 = 0.3;
+/// Desligado, o mapa aparece quando o quadro se move (mão, rolagem, zoom) e
+/// fica na tela por este tempo depois que ele para (s)...
+const PEEK_HOLD: f64 = 1.2;
+/// ... e então some aos poucos, neste tempo (s).
+const PEEK_FADE: f64 = 0.4;
 /// Maior lado da miniatura (px).
 const MAX_PX: f32 = 1024.0;
 /// Menor lado do retângulo da área visível no mapa (pontos), para ele não
@@ -51,6 +56,9 @@ pub struct Minimap {
     last_start: f64,
     /// Chave que a cena tem agora e desde quando, para esperar ela assentar.
     seen: Option<(u64, f64)>,
+    /// Câmera (scroll, zoom) do último quadro e quando ela mudou por último.
+    last_cam: Option<(P, f32)>,
+    moved_at: f64,
     done: (Sender<Rendered>, Receiver<Rendered>),
     /// Área da cena mostrada no mapa, parada enquanto se arrasta nele (senão
     /// o mapa mudaria de escala debaixo do ponteiro).
@@ -68,6 +76,8 @@ impl Default for Minimap {
             busy: false,
             last_start: f64::NEG_INFINITY,
             seen: None,
+            last_cam: None,
+            moved_at: f64::NEG_INFINITY,
             done: channel(),
             frozen: None,
             grab: P::default(),
@@ -182,6 +192,35 @@ impl Minimap {
 
     pub fn dragging(&self) -> bool {
         self.frozen.is_some()
+    }
+
+    /// Anota a câmera deste quadro; se o quadro andou ou mudou de zoom, o
+    /// mapa desligado aparece por um tempo.
+    pub fn note_camera(&mut self, scroll: P, zoom: f32, now: f64) {
+        if self.last_cam.is_some_and(|c| c != (scroll, zoom)) {
+            self.moved_at = now;
+        }
+        self.last_cam = Some((scroll, zoom));
+    }
+
+    /// Mantém o mapa que apareceu sozinho na tela (o ponteiro está nele).
+    pub fn keep_peeking(&mut self, now: f64) {
+        self.moved_at = now;
+    }
+
+    /// Opacidade do mapa: ligado, sempre 1; desligado, 1 enquanto o quadro se
+    /// move e logo depois, e então cai até 0.
+    pub fn opacity(&self, now: f64) -> f32 {
+        if self.show || self.dragging() {
+            return 1.0;
+        }
+        let idle = now - self.moved_at;
+        (1.0 - (idle - PEEK_HOLD) / PEEK_FADE).clamp(0.0, 1.0) as f32
+    }
+
+    /// Quanto falta (s) para o mapa que apareceu sozinho começar a sumir.
+    pub fn hold_left(&self, now: f64) -> f64 {
+        PEEK_HOLD - (now - self.moved_at)
     }
 }
 
@@ -568,6 +607,30 @@ mod tests {
         // pontos demais, todos no mesmo lugar: viram um só
         let pts = vec![P::new(1.0, 1.0); 100_000];
         assert_eq!(thin(&pts, 0.5).len(), 2);
+    }
+
+    #[test]
+    fn moving_the_view_shows_the_map_for_a_while() {
+        let mut m = Minimap::default();
+        let (z, p) = (1.0, P::new(0.0, 0.0));
+        // o primeiro quadro só anota a câmera
+        m.note_camera(p, z, 0.0);
+        assert_eq!(m.opacity(0.0), 0.0);
+        // mão ou rolagem: aparece
+        m.note_camera(P::new(30.0, 0.0), z, 10.0);
+        assert_eq!(m.opacity(10.0), 1.0);
+        assert_eq!(m.opacity(10.0 + PEEK_HOLD), 1.0);
+        let mid = m.opacity(10.0 + PEEK_HOLD + PEEK_FADE / 2.0);
+        assert!(mid > 0.0 && mid < 1.0);
+        assert_eq!(m.opacity(10.0 + PEEK_HOLD + PEEK_FADE + 0.01), 0.0);
+        // parado não aparece de novo; zoom aparece
+        m.note_camera(P::new(30.0, 0.0), z, 20.0);
+        assert_eq!(m.opacity(20.0), 0.0);
+        m.note_camera(P::new(30.0, 0.0), 1.1, 21.0);
+        assert_eq!(m.opacity(21.0), 1.0);
+        // ligado, fica sempre
+        m.show = true;
+        assert_eq!(m.opacity(100.0), 1.0);
     }
 
     #[test]

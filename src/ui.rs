@@ -2623,12 +2623,24 @@ fn goto_window(app: &mut App, ctx: &egui::Context, view: Rect) {
 
 /// Mini mapa (Alt+M): a cena inteira em miniatura no canto de baixo, com o
 /// retângulo da área visível. Clicar leva a tela até o ponto; arrastar move
-/// a tela junto; a roda do mouse sobre o mapa muda o zoom.
+/// a tela junto; a roda do mouse sobre o mapa muda o zoom. Desligado, ele
+/// aparece sozinho enquanto o quadro se move e some pouco depois.
 fn minimap(app: &mut App, ctx: &egui::Context, view: Rect) {
     use crate::minimap::{Fit, SIZE};
-    if !app.minimap.show {
+    // desligado, aparece enquanto o quadro se move (mão, rolagem, zoom) e
+    // some pouco depois que ele para
+    app.minimap
+        .note_camera(app.cam.scroll, app.cam.zoom, app.now);
+    let opacity = app.minimap.opacity(app.now);
+    if opacity <= 0.0 {
         app.minimap.end_drag();
         return;
+    }
+    if opacity < 1.0 {
+        ctx.request_repaint();
+    } else if !app.minimap.show {
+        let left = app.minimap.hold_left(app.now).max(0.0);
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
     }
     app.update_minimap(ctx);
     // acima do botão de ajuda; com a biblioteca ou o painel da IA abertos,
@@ -2652,6 +2664,7 @@ fn minimap(app: &mut App, ctx: &egui::Context, view: Rect) {
         )
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
+            ui.multiply_opacity(opacity);
             panel_frame(ui)
                 .inner_margin(Margin::same(4))
                 .show(ui, |ui| {
@@ -2709,6 +2722,8 @@ fn minimap(app: &mut App, ctx: &egui::Context, view: Rect) {
                         app.minimap.end_drag();
                     }
                     if resp.hovered() {
+                        // com o ponteiro em cima, o mapa que apareceu sozinho fica
+                        app.minimap.keep_peeking(app.now);
                         let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
                         let zoom = ctx.input(|i| i.zoom_delta());
                         let factor = if zoom != 1.0 {
