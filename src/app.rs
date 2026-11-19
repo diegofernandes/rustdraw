@@ -267,6 +267,8 @@ pub struct App {
     pub show_export: bool,
     pub show_help: bool,
     pub show_stats: bool,
+    /// Mini mapa (Alt+M).
+    pub minimap: crate::minimap::Minimap,
     pub zen_mode: bool,
     pub view_mode: bool,
     /// Rastro do ponteiro laser (K).
@@ -295,7 +297,7 @@ pub struct App {
     pub now: f64,
     pending_fit: bool,
     needs_measure: HashSet<String>,
-    last_prefs: Option<(bool, bool, bool, String)>,
+    last_prefs: Option<(bool, bool, bool, String, bool)>,
     /// Diálogo de arquivos aberto, aguardando a escolha do usuário.
     dialog: Option<DialogTask>,
     ctx: egui::Context,
@@ -654,6 +656,7 @@ impl App {
             show_export: false,
             show_help: false,
             show_stats: false,
+            minimap: Default::default(),
             zen_mode: false,
             view_mode: false,
             laser: Laser::default(),
@@ -739,6 +742,10 @@ impl App {
             .is_some_and(|t| t == "dark");
         self.snap = state
             .get("objectsSnapModeEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        self.minimap.show = state
+            .get("rustdrawMinimap")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         self.live_trusted = state
@@ -1749,6 +1756,7 @@ impl App {
                 if self.dark { "dark" } else { "light" }.into(),
             );
             obj.insert("objectsSnapModeEnabled".into(), self.snap.into());
+            obj.insert("rustdrawMinimap".into(), self.minimap.show.into());
             obj.insert("rustdrawMcpLive".into(), self.live.is_some().into());
             obj.insert("rustdrawMcpToken".into(), self.live_token.clone().into());
             obj.insert(
@@ -2978,13 +2986,38 @@ impl App {
 
     /// Centraliza a tela no ponto `p` da cena, sem mudar o zoom, e marca o ponto.
     pub fn go_to(&mut self, view: egui::Rect, p: P) {
+        self.center_on(view, p);
+        self.goto_mark = Some((p, self.now));
+        self.ctx.request_repaint();
+    }
+
+    /// Centraliza a tela no ponto `p` da cena, sem mudar o zoom.
+    pub fn center_on(&mut self, view: egui::Rect, p: P) {
         let z = self.cam.zoom;
         self.cam.scroll = P::new(
             (view.center().x - view.min.x) / z - p.x,
             (view.center().y - view.min.y) / z - p.y,
         );
-        self.goto_mark = Some((p, self.now));
-        self.ctx.request_repaint();
+    }
+
+    /// Parte da cena que aparece na tela.
+    pub fn view_world(&self, view: egui::Rect) -> Rect {
+        Rect::from_two(self.cam.w(view.min), self.cam.w(view.max))
+    }
+
+    /// Alt+M: mostra ou esconde o mini mapa.
+    pub fn toggle_minimap(&mut self) {
+        self.minimap.show = !self.minimap.show;
+    }
+
+    /// Atualiza a miniatura do mini mapa (fora da thread da janela) se a
+    /// cena mudou.
+    pub fn update_minimap(&mut self, ctx: &egui::Context) {
+        let sig = self
+            .synced
+            .unwrap_or_else(|| scene_signature(&self.elements));
+        self.minimap
+            .update(ctx, &self.elements, sig, self.dark, self.now);
     }
 
     /// Alt+G: abre (ou fecha) o "Ir para posição", com o centro da tela nos campos.
@@ -4305,6 +4338,9 @@ impl App {
         if kc(alt, Key::Slash) {
             self.show_stats = !self.show_stats;
         }
+        if kc(alt, Key::M) {
+            self.toggle_minimap();
+        }
         if kc(alt | sh, Key::D) {
             self.dark = !self.dark;
         }
@@ -4943,7 +4979,13 @@ impl App {
         self.poll_dialog();
         self.poll_watch(ctx);
         self.poll_live();
-        let prefs = (self.dark, self.grid, self.snap, self.view_bg.clone());
+        let prefs = (
+            self.dark,
+            self.grid,
+            self.snap,
+            self.view_bg.clone(),
+            self.minimap.show,
+        );
         if self.last_prefs.as_ref() != Some(&prefs) {
             if self.last_prefs.is_some() {
                 self.autosave_pending = true;
