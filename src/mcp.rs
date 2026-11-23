@@ -605,7 +605,7 @@ fn element_schema(creating: bool) -> Value {
         "width": {"type": "number", "description": "Formas. Padrão 160 (nota: 200)."},
         "height": {"type": "number", "description": "Formas. Padrão 80 (nota: 200)."},
         "angle": {"type": "number", "description": "Rotação em graus."},
-        "label": {"type": ["string", "null"], "description": "Texto dentro de retângulo, losango, elipse (centralizado) ou nota (em cima à esquerda); quebra na largura da forma, que cresce se ele não couber. null ou \"\" remove."},
+        "label": {"type": ["string", "null"], "description": "Texto dentro de retângulo, losango, elipse (centralizado) ou nota (em cima à esquerda); quebra na largura da forma, que cresce se ele não couber. Em linha ou seta, o texto fica no meio do caminho, a linha é interrompida atrás dele e ele acompanha a linha. null ou \"\" remove."},
         "text": {"type": "string", "description": "Conteúdo de um elemento `text` (\\n quebra linha)."},
         "fontSize": {"type": "number", "description": "Padrão 20."},
         "fontFamily": {"description": "hand (1, padrão), normal (2) ou code (3).", "oneOf": [{"type": "string", "enum": ["hand", "normal", "code"]}, {"type": "integer"}]},
@@ -665,7 +665,7 @@ fn tools() -> Value {
         },
         {
             "name": "add_elements",
-            "description": "Adiciona elementos, na ordem dada e por cima dos existentes. Devolve os ids criados. Exemplo: [{\"type\":\"rectangle\",\"id\":\"api\",\"x\":0,\"y\":0,\"label\":\"API\"},{\"type\":\"ellipse\",\"id\":\"db\",\"x\":300,\"y\":0,\"label\":\"Banco\"},{\"type\":\"arrow\",\"start\":{\"element\":\"api\"},\"end\":{\"element\":\"db\"}}]. Nota adesiva: {\"type\":\"note\",\"x\":0,\"y\":200,\"label\":\"Lembrar de...\"}.",
+            "description": "Adiciona elementos, na ordem dada e por cima dos existentes. Devolve os ids criados. Exemplo: [{\"type\":\"rectangle\",\"id\":\"api\",\"x\":0,\"y\":0,\"label\":\"API\"},{\"type\":\"ellipse\",\"id\":\"db\",\"x\":300,\"y\":0,\"label\":\"Banco\"},{\"type\":\"arrow\",\"start\":{\"element\":\"api\"},\"end\":{\"element\":\"db\"},\"label\":\"consulta\"}]. Nota adesiva: {\"type\":\"note\",\"x\":0,\"y\":200,\"label\":\"Lembrar de...\"}.",
             "inputSchema": {"type": "object", "properties": {
                 "file": file_prop(),
                 "elements": {"type": "array", "items": element_schema(true)}

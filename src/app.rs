@@ -188,6 +188,8 @@ pub enum Pending {
 struct Cached {
     version: i64,
     nonce: i64,
+    /// Buraco do rótulo com que `prims` foi feito (linhas e setas).
+    hole: Option<geom::Hole>,
     prims: Vec<Prim>,
     bounds: Rect,
 }
@@ -839,8 +841,9 @@ impl App {
         if self.synced == Some(scene_signature(&self.elements)) {
             return;
         }
-        label::sync(&mut self.elements);
+        // primeiro as setas: o rótulo de uma seta vai para o meio dela
         binding::sync(&mut self.elements, &mut self.bind_seen);
+        label::sync(&mut self.elements);
         self.synced = Some(scene_signature(&self.elements));
     }
 
@@ -2729,7 +2732,11 @@ impl App {
         }
         let (container, frame_id) = (el.id.clone(), el.frame_id.clone());
         let is_note = note::is_note(el);
-        let c = geom::center(el);
+        let c = if el.is_linear() {
+            label::path_mid(el)
+        } else {
+            geom::center(el)
+        };
         self.start_text(c, (!is_note).then_some(c.x as f64));
         let Some(ed) = &self.editing else { return };
         let t = self.elements.iter().position(|e| e.id == ed.id).unwrap();
@@ -2781,6 +2788,18 @@ impl App {
             } else {
                 self.elements.retain(|e| e.id != ed.id);
                 self.selected.remove(&ed.id);
+            }
+        }
+        // terminado o rótulo, fica selecionada a forma ou a linha dele (como no
+        // Excalidraw)
+        if self.selected.len() == 1 && self.selected.contains(&ed.id) {
+            let owner = self
+                .elements
+                .iter()
+                .position(|e| e.id == ed.id)
+                .and_then(|i| label::container_of(&self.elements, i));
+            if let Some(c) = owner {
+                self.selected = [self.elements[c].id.clone()].into();
             }
         }
         self.commit(ed.before);
@@ -3289,9 +3308,11 @@ impl App {
         true
     }
 
-    /// Duplo clique com uma linha/seta selecionada: no meio de um segmento em
-    /// cotovelo, solta o segmento fixo; numa linha comum, adiciona um ponto ali.
-    fn double_click_linear(&mut self, p: P) -> bool {
+    /// Duplo clique com uma linha/seta selecionada. Como no Excalidraw,
+    /// escreve o rótulo dela; com Ctrl/Cmd, numa linha comum, adiciona um
+    /// ponto ali. Numa seta em cotovelo, no meio de um segmento fixo, solta o
+    /// segmento.
+    fn double_click_linear(&mut self, p: P, command: bool) -> bool {
         let Some(el) = self
             .single_selected()
             .filter(|e| e.is_linear() && !e.locked)
@@ -3299,6 +3320,28 @@ impl App {
         else {
             return false;
         };
+        let handle = self.handle_at(self.cam.s(p));
+        let on_line = handle.is_some() || geom::hit_test(&el, p, 8.0 / self.cam.zoom);
+        let elbow_mid = el.is_elbow() && matches!(handle, Some(Handle::Mid(_)));
+        if !on_line {
+            return false;
+        }
+        if !elbow_mid && (!command || el.is_elbow()) {
+            // o primeiro clique no meio de um segmento já criou um ponto: desfaz
+            if let Drag::Points {
+                inserted: true,
+                before,
+                ..
+            } = std::mem::replace(&mut self.drag, Drag::None)
+            {
+                self.elements = before;
+            }
+            self.point_sel = None;
+            if let Some(i) = self.elements.iter().position(|e| e.id == el.id) {
+                self.edit_text_at(i);
+            }
+            return true;
+        }
         let before = match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Segment { before, .. } | Drag::Points { before, .. } => before,
             Drag::Move { before, .. } => before,
@@ -3307,7 +3350,6 @@ impl App {
                 self.elements.clone()
             }
         };
-        let handle = self.handle_at(self.cam.s(p));
         if el.is_elbow() {
             let Some(Handle::Mid(i)) = handle else {
                 return true;
@@ -3321,9 +3363,9 @@ impl App {
             self.commit(before);
             return true;
         }
-        if handle.is_some() || !geom::hit_test(&el, p, 8.0 / self.cam.zoom) {
+        if handle.is_some() {
             self.commit(before);
-            return handle.is_some();
+            return true;
         }
         // ponto mais perto no segmento mais perto (no referencial da linha)
         let q = rotate(p, geom::center(&el), -(el.angle as f32));
@@ -3482,7 +3524,7 @@ impl App {
         if over && dbl && self.tool == Tool::Select && self.editing.is_none() && !self.view_mode {
             match self.frame_label_at(pos) {
                 Some(id) => self.rename_frame(&id),
-                None => self.on_double_click(wp),
+                None => self.on_double_click(wp, mods.command),
             }
         }
         if over && dbl && matches!(self.drag, Drag::LinearMulti { .. }) {
@@ -3734,9 +3776,13 @@ impl App {
                 self.drag = Drag::FreeDraw { id, before };
             }
             Tool::Text => {
+                // clicar num texto o edita; numa linha/seta, escreve o rótulo dela
                 if let Some(i) = self
                     .element_at(p)
-                    .filter(|&i| self.elements[i].kind == "text")
+                    .filter(|&i| {
+                        let e = &self.elements[i];
+                        e.kind == "text" || (e.is_linear() && label::can_contain(e) && !e.locked)
+                    })
                     .or_else(|| self.container_at(p))
                 {
                     self.edit_text_at(i);
@@ -3759,8 +3805,8 @@ impl App {
         }
     }
 
-    fn on_double_click(&mut self, p: P) {
-        if self.double_click_linear(p) {
+    fn on_double_click(&mut self, p: P, command: bool) {
+        if self.double_click_linear(p, command) {
             return;
         }
         match self.element_at(p) {
@@ -4700,16 +4746,24 @@ impl App {
         };
         let mut live: HashSet<&str> = HashSet::new();
         let frame_rects = frame::rects(&self.elements);
+        let holes = label::holes(&self.elements);
         for el in &self.elements {
             live.insert(el.id.as_str());
             let entry = self.cache.entry(el.id.clone()).or_insert_with(|| Cached {
                 version: i64::MIN,
                 nonce: 0,
+                hole: None,
                 prims: vec![],
                 bounds: Rect::from_two(P::default(), P::default()),
             });
-            if entry.version != el.version || entry.nonce != el.version_nonce {
-                entry.prims = geom::element_prims(el);
+            let hole = holes
+                .get(el.id.as_str())
+                .copied()
+                .filter(|_| el.is_linear());
+            if entry.version != el.version || entry.nonce != el.version_nonce || entry.hole != hole
+            {
+                entry.prims = label::prims(el, &holes);
+                entry.hole = hole;
                 entry.bounds = geom::aabb(el).expand(el.stroke_width as f32 * 2.0 + 30.0);
                 entry.version = el.version;
                 entry.nonce = el.version_nonce;
@@ -5671,6 +5725,68 @@ mod tests {
         );
         let label = &app.elements[label::label_of(&app.elements, "a").unwrap()];
         assert!(geom::center(label).y > 300.0, "o rótulo acompanhou a forma");
+    }
+
+    fn get<'a>(app: &'a App, id: &str) -> &'a Element {
+        app.elements.iter().find(|e| e.id == id).unwrap()
+    }
+
+    #[test]
+    fn double_click_on_a_line_writes_its_label_and_ctrl_adds_a_point() {
+        let mut app = App::empty(egui::Context::default(), None, vec![]);
+        let specs = [
+            serde_json::json!({"type": "rectangle", "id": "a"}),
+            serde_json::json!({"type": "rectangle", "id": "b", "x": 400}),
+            serde_json::json!({"type": "arrow", "id": "s", "start": {"element": "a"}, "end": {"element": "b"}}),
+        ];
+        crate::edit::add(&mut app.elements, &mut Map::new(), &specs).unwrap();
+        app.sync_bindings();
+        let arrow = app.elements.iter().find(|e| e.id == "s").unwrap().clone();
+        let mid = label::path_mid(&arrow);
+        let n = app.elements.len();
+
+        // duplo clique (o primeiro clique seleciona a seta)
+        app.on_press(mid, app.cam.s(mid), Modifiers::NONE);
+        app.on_release(mid);
+        app.on_press(mid, app.cam.s(mid), Modifiers::NONE);
+        app.on_double_click(mid, false);
+        app.on_release(mid);
+        let id = app.editing.as_ref().expect("abriu o texto").id.clone();
+        let t = get(&app, &id);
+        assert_eq!(label::container_id(t), Some("s"));
+        assert_eq!(geom::abs_points(get(&app, "s")).len(), 2, "sem ponto novo");
+        app.editing.as_mut().unwrap().buf = "consulta".into();
+        if let Some(t) = app.get_mut(&id) {
+            t.set_text("consulta");
+            t.width = 80.0;
+            t.height = 25.0;
+            t.touch();
+        }
+        app.finish_editing();
+        assert_eq!(app.elements.len(), n + 1);
+        let t = get(&app, &id);
+        let c = geom::local_box(t).center();
+        assert!((c - mid).len() < 0.5, "no meio da seta");
+
+        // mover a forma move a seta e o rótulo vai junto
+        let b = app.get_mut("b").unwrap();
+        b.y += 200.0;
+        b.touch();
+        app.sync_bindings();
+        let mid2 = label::path_mid(get(&app, "s"));
+        assert!(mid2.y > mid.y + 50.0);
+        let c = geom::local_box(get(&app, &id)).center();
+        assert!((c - mid2).len() < 0.5, "o rótulo acompanhou a seta");
+
+        // Ctrl/Cmd + duplo clique adiciona um ponto, como antes
+        app.selected = ["s".to_string()].into();
+        let pts = geom::abs_points(get(&app, "s"));
+        let at = label::path_mid(get(&app, "s")) + (pts[1] - pts[0]).normalized() * 40.0;
+        let before = geom::abs_points(get(&app, "s")).len();
+        assert!(geom::hit_test(get(&app, "s"), at, 1.0));
+        app.on_double_click(at, true);
+        assert_eq!(geom::abs_points(get(&app, "s")).len(), before + 1);
+        assert!(app.editing.is_none());
     }
 
     #[test]

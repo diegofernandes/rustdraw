@@ -3,8 +3,8 @@
 //! Os elementos são descritos em JSON com os mesmos nomes de campo do
 //! `.excalidraw` (`strokeColor`, `fontSize`...), com algumas facilidades:
 //! `angle` em graus, `rounded` em vez de `roundness`, `label` para escrever um
-//! texto centralizado dentro de uma forma e `start`/`end` para ligar as pontas
-//! de uma seta em formas pelo id.
+//! texto centralizado dentro de uma forma (ou no meio de uma linha/seta) e
+//! `start`/`end` para ligar as pontas de uma seta em formas pelo id.
 
 use crate::binding::{self, ANCHORS, Binding};
 use crate::elbow;
@@ -312,13 +312,14 @@ pub fn summary(el: &Element, all: &[Element]) -> Value {
                 o.insert("end".into(), end_summary(el, true));
             }
         }
-        _ => {
-            if let Some(l) = label_of(all, &el.id) {
-                // o que foi escrito, sem as quebras automáticas
-                let text = l.str_field("originalText").unwrap_or(l.text());
-                o.insert("label".into(), json!(text));
-            }
-        }
+        _ => {}
+    }
+    if label::can_contain(el)
+        && let Some(l) = label_of(all, &el.id)
+    {
+        // o que foi escrito, sem as quebras automáticas
+        let text = l.str_field("originalText").unwrap_or(l.text());
+        o.insert("label".into(), json!(text));
     }
     if !el.group_ids.is_empty() {
         o.insert("groupIds".into(), json!(el.group_ids));
@@ -564,12 +565,15 @@ fn apply_linear(el: &mut Element, s: &Spec, els: &[Element], creating: bool) -> 
     Ok(())
 }
 
+const LABEL_KINDS: &str = "`label` só vale para retângulo, losango, elipse, nota, linha e seta";
+
 fn spec_of(v: &Value, i: usize) -> Result<&Spec, String> {
     v.as_object()
         .ok_or_else(|| format!("item {i}: precisa ser um objeto"))
 }
 
-/// Cria, troca ou remove o rótulo (texto centralizado) de uma forma.
+/// Cria, troca ou remove o rótulo (texto centralizado) de uma forma, linha
+/// ou seta.
 fn set_label(
     els: &mut Vec<Element>,
     container: &str,
@@ -599,13 +603,11 @@ fn set_label(
             if note::is_note(shape) {
                 note::style_text(&mut t);
             }
-            // agrupado com a forma, para que no editor os dois andem juntos
-            let group = new_id();
-            t.group_ids = std::iter::once(group.clone())
-                .chain(shape.group_ids.iter().cloned())
-                .collect();
+            // nos mesmos grupos da forma; o `containerId` já faz o texto andar
+            // com ela, sem grupo próprio (como no Excalidraw)
+            t.group_ids = shape.group_ids.clone();
+            t.frame_id = shape.frame_id.clone();
             let shape = &mut els[ci];
-            shape.group_ids.insert(0, group);
             let mut bound = shape
                 .bound_elements
                 .as_ref()
@@ -646,18 +648,6 @@ fn center_label(els: &mut [Element], container: &str) {
 /// setas ligadas acompanharem as formas alteradas.
 fn finish(els: &mut [Element], changed: &HashSet<String>) {
     binding::tidy(els);
-    let containers: Vec<String> = els
-        .iter()
-        .filter(|e| e.kind == "text")
-        .filter_map(|e| e.str_field("containerId").map(String::from))
-        .filter(|c| els.iter().any(|e| e.id == *c))
-        .collect();
-    for c in containers {
-        let label_changed = label_of(els, &c).is_some_and(|l| changed.contains(&l.id));
-        if changed.contains(&c) || label_changed {
-            center_label(els, &c);
-        }
-    }
     let arrows: Vec<String> = els
         .iter()
         .filter(|e| e.kind == "arrow")
@@ -669,8 +659,21 @@ fn finish(els: &mut [Element], changed: &HashSet<String>) {
         })
         .map(|e| e.id.clone())
         .collect();
-    for id in arrows {
-        binding::refresh_arrow(els, &id);
+    for id in &arrows {
+        binding::refresh_arrow(els, id);
+    }
+    // depois das setas: o rótulo de uma seta que andou vai junto
+    let containers: Vec<String> = els
+        .iter()
+        .filter(|e| e.kind == "text")
+        .filter_map(|e| e.str_field("containerId").map(String::from))
+        .filter(|c| els.iter().any(|e| e.id == *c))
+        .collect();
+    for c in containers {
+        let label_changed = label_of(els, &c).is_some_and(|l| changed.contains(&l.id));
+        if changed.contains(&c) || arrows.contains(&c) || label_changed {
+            center_label(els, &c);
+        }
     }
 }
 
@@ -766,10 +769,8 @@ pub fn add(
         let id = el.id.clone();
         els.push(el);
         if let Some(label) = string(s, "label").map_err(ctx)? {
-            if !matches!(kind, "rectangle" | "diamond" | "ellipse") {
-                return Err(ctx(
-                    "`label` só vale para retângulo, losango, elipse e nota".into(),
-                ));
+            if !matches!(kind, "rectangle" | "diamond" | "ellipse" | "line" | "arrow") {
+                return Err(ctx(LABEL_KINDS.into()));
             }
             set_label(els, &id, Some(label), s).map_err(ctx)?;
         }
@@ -816,10 +817,8 @@ pub fn update(els: &mut Vec<Element>, specs: &[Value]) -> Result<Vec<String>, St
         el.touch();
         els[idx] = el;
         if s.contains_key("label") {
-            if !matches!(els[idx].kind.as_str(), "rectangle" | "diamond" | "ellipse") {
-                return Err(ctx(
-                    "`label` só vale para retângulo, losango, elipse e nota".into(),
-                ));
+            if !label::can_contain(&els[idx]) {
+                return Err(ctx(LABEL_KINDS.into()));
             }
             let label = string(s, "label").map_err(ctx)?.map(String::from);
             set_label(els, &id, label.as_deref(), s).map_err(ctx)?;
@@ -979,6 +978,45 @@ mod tests {
         );
         let a = els.iter().find(|e| e.id == "a").unwrap();
         assert_eq!(a.group_ids, label.group_ids);
+    }
+
+    #[test]
+    fn arrows_and_lines_get_labels_in_the_middle() {
+        let mut els = scene();
+        update(&mut els, &[json!({"id": "s", "label": "consulta"})]).unwrap();
+        let s = els.iter().find(|e| e.id == "s").unwrap();
+        let t = label_of(&els, "s").unwrap();
+        assert_eq!(t.text(), "consulta");
+        assert!(t.group_ids.is_empty(), "sem grupo: o containerId basta");
+        let mid = label::path_mid(s);
+        assert!((geom::local_box(t).center() - mid).len() < 0.5);
+        assert_eq!(summary(s, &els)["label"], "consulta");
+
+        // a forma anda, a seta anda e o rótulo vai para o novo meio
+        update(&mut els, &[json!({"id": "b", "y": 300})]).unwrap();
+        let s = els.iter().find(|e| e.id == "s").unwrap();
+        let t = label_of(&els, "s").unwrap();
+        assert!((geom::local_box(t).center() - label::path_mid(s)).len() < 0.5);
+
+        // linha nova com rótulo; texto vazio tira o rótulo
+        let ids = add(
+            &mut els,
+            &mut Map::new(),
+            &[json!({"type": "line", "x": 0, "y": 500, "points": [[0, 0], [300, 0]], "label": "fronteira"})],
+        )
+        .unwrap();
+        let t = label_of(&els, &ids[0]).unwrap();
+        assert!((geom::local_box(t).center() - geom::P::new(150.0, 500.0)).len() < 0.5);
+        update(&mut els, &[json!({"id": ids[0], "label": ""})]).unwrap();
+        assert!(label_of(&els, &ids[0]).is_none());
+        assert!(update(&mut els, &[json!({"id": "a", "label": "ok"})]).is_ok());
+        let e = add(
+            &mut els,
+            &mut Map::new(),
+            &[json!({"type": "freedraw", "points": [[0, 0], [5, 5]], "label": "x"})],
+        )
+        .unwrap_err();
+        assert!(e.contains("linha e seta"), "{e}");
     }
 
     #[test]

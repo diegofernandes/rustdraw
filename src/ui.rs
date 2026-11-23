@@ -1620,7 +1620,7 @@ fn text_editor(app: &mut App, ctx: &egui::Context) {
     let wrap = crate::label::container_id(el)
         .and_then(|c| app.elements.iter().find(|e| e.id == c))
         .map_or(f32::INFINITY, |c| {
-            crate::label::max_width(c).max(1.0) as f32 * z
+            crate::label::max_width(c, el.font_size()).max(1.0) as f32 * z
         });
     // linhas alinhadas como no canvas, dentro da largura do texto
     let halign = match el.text_align() {
@@ -1916,7 +1916,8 @@ fn help_window(app: &mut App, ctx: &egui::Context) {
                     ("Diminuir / aumentar fonte", "Ctrl+Shift+< / >"),
                     ("Mover 1px / 5px", "Setas / Shift+setas"),
                     ("Seta sem grudar na forma", "Ctrl+arrastar"),
-                    ("Linha: adicionar ponto", "Arrastar o meio · duplo clique"),
+                    ("Texto na linha ou seta", "Duplo clique na linha"),
+                    ("Linha: adicionar ponto", "Arrastar o meio · Ctrl+duplo clique"),
                     ("Linha: selecionar pontos", "Clique · Shift+clique"),
                     ("Linha: apagar pontos", "Delete"),
                     ("Cotovelo: soltar segmento", "Duplo clique no meio"),
@@ -2101,6 +2102,17 @@ fn hint(app: &App, ctx: &egui::Context) {
         (_, Tool::Note) => "Clique para colar uma nota, ou arraste para escolher o tamanho",
         (_, Tool::Frame) => {
             "Arraste para criar um frame · o que ficar dentro passa a fazer parte dele"
+        }
+        (_, Tool::Select)
+            if app
+                .single_selected()
+                .is_some_and(|e| e.is_linear() && !e.locked && matches!(app.drag, Drag::None)) =>
+        {
+            if app.single_selected().is_some_and(|e| e.is_elbow()) {
+                "Duplo clique para escrever na seta"
+            } else {
+                "Duplo clique para escrever na linha · Ctrl+duplo clique adiciona um ponto"
+            }
         }
         (_, Tool::Select) if app.elements.is_empty() => {
             "Escolha uma ferramenta acima ou dê duplo clique para escrever · ? mostra os atalhos"
@@ -2833,10 +2845,11 @@ fn library_thumb(app: &mut App, id: &str) -> Option<(crate::geom::Rect, Vec<crat
     if !app.library_thumbs.contains_key(id) {
         let item = app.library.iter().find(|i| i.id == id)?;
         let b = crate::export::bounds_with_text(&item.elements)?;
+        let holes = crate::label::holes(&item.elements);
         let prims = item
             .elements
             .iter()
-            .flat_map(crate::geom::element_prims)
+            .flat_map(|e| crate::label::prims(e, &holes))
             .collect();
         app.library_thumbs.insert(id.to_string(), (b, prims));
     }
