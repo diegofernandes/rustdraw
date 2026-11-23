@@ -822,6 +822,123 @@ fn chaikin(pts: &[P]) -> Vec<P> {
 }
 
 // ---------------------------------------------------------------------------
+// Buraco do rótulo
+// ---------------------------------------------------------------------------
+
+/// Retângulo (girado por `angle` em torno de `center`) onde uma linha ou seta
+/// não é desenhada: o lugar do texto dela, como no Excalidraw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hole {
+    pub center: P,
+    /// Metade da largura e da altura.
+    pub half: P,
+    pub angle: f32,
+}
+
+impl Hole {
+    /// Os quatro cantos (mundo), no sentido horário da tela.
+    pub fn corners(&self) -> [P; 4] {
+        let (c, h) = (self.center, self.half);
+        [
+            P::new(c.x - h.x, c.y - h.y),
+            P::new(c.x + h.x, c.y - h.y),
+            P::new(c.x + h.x, c.y + h.y),
+            P::new(c.x - h.x, c.y + h.y),
+        ]
+        .map(|p| rotate(p, c, self.angle))
+    }
+
+    /// Trecho (frações de 0 a 1) do segmento `a`→`b` que fica dentro do
+    /// buraco (recorte de Liang–Barsky no referencial do buraco).
+    fn inside(&self, a: P, b: P) -> Option<(f32, f32)> {
+        let a = rotate(a, self.center, -self.angle) - self.center;
+        let b = rotate(b, self.center, -self.angle) - self.center;
+        let d = b - a;
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for (p, q) in [
+            (-d.x, a.x + self.half.x),
+            (d.x, self.half.x - a.x),
+            (-d.y, a.y + self.half.y),
+            (d.y, self.half.y - a.y),
+        ] {
+            if p.abs() < 1e-9 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else if p < 0.0 {
+                t0 = t0.max(q / p);
+            } else {
+                t1 = t1.min(q / p);
+            }
+        }
+        (t1 - t0 > 1e-6).then_some((t0, t1))
+    }
+
+    /// Parte a polilinha `pts` nos pedaços que ficam fora do buraco.
+    pub fn split(&self, pts: &[P]) -> Vec<Vec<P>> {
+        let mut out = Vec::new();
+        let mut cur: Vec<P> = Vec::new();
+        if pts.len() < 2 {
+            return vec![pts.to_vec()];
+        }
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            match self.inside(a, b) {
+                None => {
+                    if cur.is_empty() {
+                        cur.push(a);
+                    }
+                    cur.push(b);
+                }
+                Some((t0, t1)) => {
+                    if t0 > 0.0 {
+                        if cur.is_empty() {
+                            cur.push(a);
+                        }
+                        cur.push(a + (b - a) * t0);
+                    }
+                    if cur.len() >= 2 {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    cur.clear();
+                    if t1 < 1.0 {
+                        cur.push(a + (b - a) * t1);
+                        cur.push(b);
+                    }
+                }
+            }
+        }
+        if cur.len() >= 2 {
+            out.push(cur);
+        }
+        out
+    }
+}
+
+/// Tira dos traços de `prims` o que passa dentro de `hole` (os preenchimentos
+/// ficam: o texto é desenhado por cima deles).
+pub fn cut_out(prims: Vec<Prim>, hole: &Hole) -> Vec<Prim> {
+    let mut out = Vec::with_capacity(prims.len());
+    for p in prims {
+        match p {
+            Prim::Stroke {
+                pts,
+                color,
+                width,
+                dash,
+            } => out.extend(hole.split(&pts).into_iter().map(|pts| Prim::Stroke {
+                pts,
+                color,
+                width,
+                dash,
+            })),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Hit-test
 // ---------------------------------------------------------------------------
 
@@ -992,5 +1109,40 @@ mod tests {
             }
             assert!(!element_prims(&e).is_empty(), "{k}");
         }
+    }
+
+    #[test]
+    fn hole_cuts_the_part_of_the_line_inside_it() {
+        let hole = Hole {
+            center: P::new(50.0, 0.0),
+            half: P::new(10.0, 5.0),
+            angle: 0.0,
+        };
+        let near = |a: P, b: P| (a - b).len() < 1e-3;
+        let parts = hole.split(&[P::new(0.0, 0.0), P::new(100.0, 0.0)]);
+        assert_eq!(parts.len(), 2);
+        assert!(near(parts[0][0], P::new(0.0, 0.0)) && near(parts[0][1], P::new(40.0, 0.0)));
+        assert!(near(parts[1][0], P::new(60.0, 0.0)) && near(parts[1][1], P::new(100.0, 0.0)));
+        // vários segmentos, um deles todo dentro do buraco
+        let parts = hole.split(&[
+            P::new(0.0, 0.0),
+            P::new(45.0, 0.0),
+            P::new(55.0, 0.0),
+            P::new(100.0, 0.0),
+        ]);
+        assert_eq!(parts.len(), 2);
+        assert!(near(*parts[0].last().unwrap(), P::new(40.0, 0.0)));
+        assert!(near(parts[1][0], P::new(60.0, 0.0)));
+        // longe do buraco: inteira
+        let far = [P::new(0.0, 20.0), P::new(100.0, 20.0)];
+        assert_eq!(hole.split(&far), vec![far.to_vec()]);
+        // buraco girado 90°: agora é estreito na horizontal
+        let turned = Hole {
+            angle: std::f32::consts::FRAC_PI_2,
+            ..hole
+        };
+        let parts = turned.split(&[P::new(0.0, 0.0), P::new(100.0, 0.0)]);
+        assert!((parts[0][1].x - 45.0).abs() < 1e-3);
+        assert!((parts[1][0].x - 55.0).abs() < 1e-3);
     }
 }

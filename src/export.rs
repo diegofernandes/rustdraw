@@ -3,7 +3,7 @@
 
 use crate::fonts::{self, Family};
 use crate::frame;
-use crate::geom::{P, Prim, Rect, Rgba, element_prims, image_placeholder, local_box, scene_bounds};
+use crate::geom::{P, Prim, Rect, Rgba, image_placeholder, local_box, scene_bounds};
 use crate::model::{Element, dark_filter, parse_color};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -122,6 +122,8 @@ fn element_bounds(e: &Element) -> Option<Rect> {
 pub(crate) struct Item<'a> {
     pub id: &'a str,
     pub prims: Vec<Prim>,
+    /// Buraco do rótulo, numa linha/seta (já tirado de `prims`).
+    pub hole: Option<crate::geom::Hole>,
     pub clip: Option<&'a str>,
 }
 
@@ -154,6 +156,7 @@ fn frame_name_prim(f: &Element) -> Prim {
 /// recortados) ou, com `opts.frame`, só o conteúdo de um frame, sem margem.
 pub(crate) fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>, String> {
     let clips = frame::rects(els);
+    let holes = crate::label::holes(els);
     if let Some(fid) = &opts.frame {
         let (&id, &r) = clips
             .get_key_value(fid.as_str())
@@ -163,7 +166,8 @@ pub(crate) fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>
             .filter(|e| e.frame_id.as_deref() == Some(id) && !frame::is_frame(e))
             .map(|e| Item {
                 id: &e.id,
-                prims: element_prims(e),
+                prims: crate::label::prims(e, &holes),
+                hole: holes.get(e.id.as_str()).copied().filter(|_| e.is_linear()),
                 clip: Some(id),
             })
             .collect();
@@ -178,7 +182,7 @@ pub(crate) fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>
     let mut bounds: Option<Rect> = None;
     let mut items = Vec::new();
     for e in els {
-        let mut prims = element_prims(e);
+        let mut prims = crate::label::prims(e, &holes);
         let mut b = element_bounds(e);
         let clip = e
             .frame_id
@@ -206,6 +210,7 @@ pub(crate) fn plan<'a>(els: &'a [Element], opts: &ExportOpts) -> Result<Plan<'a>
         items.push(Item {
             id: &e.id,
             prims,
+            hole: holes.get(e.id.as_str()).copied().filter(|_| e.is_linear()),
             clip: clip.map(|(k, _)| *k),
         });
     }

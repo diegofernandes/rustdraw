@@ -63,6 +63,18 @@ struct Writer<'a> {
     image_names: HashMap<(String, [u32; 4]), Option<String>>,
 }
 
+/// Área com sinal do polígono (o sinal diz o sentido).
+fn area(pts: &[P]) -> f32 {
+    let n = pts.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum::<f32>()
+        / 2.0
+}
+
 /// Número curto: até 2 casas, sem zeros à direita.
 fn num(v: f32) -> String {
     let s = format!("{v:.2}");
@@ -250,7 +262,32 @@ impl Writer<'_> {
                 );
                 self.path(line.as_ref(), fill.as_ref(), &extra, &path);
             }
-            "line" | "arrow" => self.linear(e, turn(abs_points(e)), line, fill),
+            "line" | "arrow" => {
+                // o rótulo abre um buraco na linha: recorta tudo menos ele
+                if let Some(h) = &item.hole {
+                    let outer = crate::geom::aabb(e)
+                        .expand(e.stroke_width as f32 * 4.0 + 40.0)
+                        .union(crate::geom::Rect::from_points(&h.corners()).unwrap());
+                    let outer = [
+                        outer.min,
+                        P::new(outer.max.x, outer.min.y),
+                        outer.max,
+                        P::new(outer.min.x, outer.max.y),
+                    ];
+                    // sentido contrário ao de fora: pela regra do não-zero, fura
+                    let mut inner = h.corners().to_vec();
+                    if (area(&outer) > 0.0) == (area(&inner) > 0.0) {
+                        inner.reverse();
+                    }
+                    let _ = writeln!(self.body, "  \\begin{{scope}}");
+                    let (o, i) = (self.polygon(&outer), self.polygon(&inner));
+                    let _ = writeln!(self.body, "  \\clip {o}\n    {i};");
+                }
+                self.linear(e, turn(abs_points(e)), line, fill);
+                if item.hole.is_some() {
+                    let _ = writeln!(self.body, "  \\end{{scope}}");
+                }
+            }
             "frame" | "magicframe" => {
                 let r = frame::RADIUS.min(b.width() / 2.0).min(b.height() / 2.0);
                 let pts = [
@@ -914,6 +951,25 @@ mod tests {
             ..Default::default()
         };
         render_tikz(els, &opts, None).unwrap().code
+    }
+
+    #[test]
+    fn a_labeled_arrow_is_clipped_around_its_label() {
+        let s = Style::default();
+        let mut a = Element::new("arrow", 0.0, 0.0, &s);
+        a.id = "a".into();
+        a.set_points(vec![[0.0, 0.0], [200.0, 0.0]]);
+        let mut t = Element::new("text", 80.0, -12.5, &s);
+        t.set_text("rótulo");
+        (t.width, t.height) = (40.0, 25.0);
+        crate::label::attach(&mut t, &mut a);
+        let code = tikz(&[a.clone(), t.clone()]);
+        assert!(code.contains("\\begin{scope}\n  \\clip "), "{code}");
+        assert!(code.contains("\\end{scope}"));
+        assert!(code.contains("rótulo"));
+        // sem rótulo, sem recorte
+        a.bound_elements = None;
+        assert!(!tikz(&[a]).contains("\\clip"));
     }
 
     #[test]
